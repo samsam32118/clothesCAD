@@ -18,8 +18,10 @@ and the same shared store, so whatever an agent does shows up in the visible app
 }
 ```
 
-Only the four measurements plus `garment`, `styleId` and `materialId` are required. Optional measurements
-(`thighCm`, `waistToFloorCm`, …) are estimated when omitted. Get the full JSON Schema (draft 2020-12) from
+Only the four measurements plus `garment` are required. **`styleId` and `materialId` may be left out in every
+interface** (`design(request)`, `json {...}`, the console and the CLI): they are picked for you as described below, and
+`design()` lists what it filled in under `data.picks` (`{filled, styleId, materialId, occasion, reasons}`). Optional
+measurements (`thighCm`, `waistToFloorCm`, …) are estimated when omitted. Get the full JSON Schema (draft 2020-12) from
 `clothesCAD.schema()`, the `schema` command, or `npm run cli -- schema`. Valid ids come from `list garments|materials|styles`.
 Option values a garment does not offer are handled differently per interface:
 
@@ -29,11 +31,19 @@ Option values a garment does not offer are handled differently per interface:
   still `ok: true`, so check `substitutions`. Pass `clothesCAD.design(req, { strict: true })` to get `ok: false`
   (with `issues` naming each option) instead.
 
-If you leave out `styleId` or `materialId` (CLI, or `set garment=` in the console), clothesCAD picks them for you:
-the occasion (inferred from the garment when not given: a ball gown is evening wear), region and body shape choose the
-style first, then a cloth *for that style*. Cloths that do not suit the garment or occasion are never picked
-automatically (no runway gown in shirting cotton). Changing the garment or occasion with `set` swaps an unsuitable
-style or cloth and says so in `notes`.
+**Automatic picks.** When `styleId` or `materialId` is missing, the occasion (inferred from the garment when not given:
+a ball gown is evening wear), region and body shape choose the style first, then a cloth *for that style*. When you
+give only the cloth, the style is picked to suit that cloth (a silk crepe de chine shell gets a style whose own cloths
+include silk, not a summer-linen one). Cloths that do not suit the garment or occasion are never picked automatically
+(no runway gown in shirting cotton). Changing the garment or occasion with `set` swaps an unsuitable style or cloth and
+says so in `notes`. Reasons are given only for what was actually picked.
+
+**Explicit choices are checked too.** If you name a cloth or style the automatic picks would never choose (a lining or
+day cotton for a ball gown, a cloth of the wrong construction, an everyday-only style for evening wear), the design
+still runs with your choice, but `data.warnings` (console: `Warning:` lines; CLI: `warning:` lines) explains why and
+names better-suited ids, for example:
+`Cotton poplin is an unusual choice for a ball gown: it is an everyday/work cloth and this is evening wear. Consider silk-mikado, silk-duchesse-satin, silk-organza.`
+Always read `data.warnings`, not just `ok`.
 
 ## 2. In the browser: `window.clothesCAD`
 
@@ -46,7 +56,7 @@ The API is ready as soon as the page loads. Every method accepts a plain object 
 | `listGarments()` / `listMaterials({region?, occasion?, garment?})` / `listStyles({region?, occasion?})` | catalogue summaries |
 | `recommend({garment?, styleId?, occasion?, region?, measurements?, limit?})` | ranked ids + plain-language reasons |
 | `validate(measurements)` | `{valid, issues, estimated, body}` |
-| `design(request, {strict?})` | design summary (id, fit rationale, pieces, BOM, quality, `substitutions`, `warnings`); also updates the app |
+| `design(request, {strict?})` | design summary (id, fit rationale, pieces, BOM, quality, `substitutions`, `warnings`, and `picks` when style/cloth were left out); also updates the app |
 | `getState()` / `setState(patch)` | app state; patch `{measurements?, garment?, styleId?, materialId?, occasion?, region?, options?, name?, unit?, tab?}` |
 | `exportSVG('pattern' \| 'layout' \| 'print' \| 'piece', opts?)` | SVG string (`print` → string[] of pages; opts `{paper}`, `{layer}`, `{pieceId, realSize}`) |
 | `exportPrintHTML({paper})`, `exportMarkdown()`, `exportJSON()` | strings / the full `DesignPackage` |
@@ -55,9 +65,13 @@ The API is ready as soon as the page loads. Every method accepts a plain object 
 
 ```js
 const r = clothesCAD.design({ measurements: { heightCm: 165, bustCm: 88, waistCm: 70, hipCm: 96 },
-  garment: 'a-line-skirt', styleId: 'parisian-chic', materialId: 'wool-crepe' });
+  garment: 'a-line-skirt', styleId: 'parisian-chic', materialId: 'cotton-poplin' });
 if (!r.ok) console.log(r.error, r.issues);
-if (r.ok && r.data.substitutions.length) console.log('Not exactly as requested:', r.data.warnings);
+if (r.ok && r.data.warnings.length) console.log('Read before sewing:', r.data.warnings);
+
+// Let clothesCAD choose the style and cloth:
+const auto = clothesCAD.design({ measurements: { heightCm: 165, bustCm: 88, waistCm: 70, hipCm: 96 }, garment: 'wrap-dress' });
+if (auto.ok) console.log(auto.data.picks); // { filled: ['styleId','materialId'], styleId, materialId, reasons }
 const svg = clothesCAD.exportSVG('pattern').data;
 
 const s = await clothesCAD.run('reset; measure height=168 bust=92 waist=74 hip=100; set garment=shift-dress; design');
@@ -83,7 +97,11 @@ Open `/#cmd=<url-encoded commands separated by ;>` to run commands on load. For 
   Setting a new hash runs the new commands.
 - `<html data-clothescad="ready">` is set once the start-up commands have finished (`running` while they run).
 - `<pre id="agent-output">` (hidden) always holds the last command result as JSON, with `data-ok="true|false"`.
-- Commands stop at the first failure.
+- Commands stop at the first failure. When a hash script fails, the app puts back the state it had before the link
+  (so a person who opens a broken link keeps their own measurements and design) and shows a banner naming the failing
+  command; `<pre id="agent-output" data-ok="false">` still holds the failing result. With `&keep=1` the commands
+  before the failure stay applied. When a successful link replaces a person's own measurements or design, the banner
+  offers to restore them.
 
 ## 4. Commands (Console tab, `run()`, hash, CLI `run`)
 

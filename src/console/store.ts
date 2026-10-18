@@ -59,6 +59,24 @@ export interface AppData {
   consoleLog: ConsoleEntry[];
   consoleHistory: string[];
   lastResult: CommandResult | null;
+  /** Outcome of the commands a `#cmd=` link ran at start-up, shown as a banner (not persisted). */
+  linkNotice: LinkNotice | null;
+}
+
+/** Everything a `#cmd=` link may replace: enough to put the user's own work back. */
+export type SessionSnapshot = Pick<
+  AppData,
+  'measurements' | 'measurementsAreSample' | 'unit' | 'selection' | 'pkg' | 'designedRequest' | 'designError' | 'tab'
+>;
+
+export interface LinkNotice {
+  ok: boolean;
+  /** Plain-language summary for the banner. */
+  message: string;
+  /** The failing command (when ok is false). */
+  failedCommand: string | null;
+  /** The user's state from before the link ran, when it can still be restored. */
+  undo: SessionSnapshot | null;
 }
 
 export type DesignOutcome =
@@ -84,6 +102,10 @@ export interface AppActions {
   pushHistory(line: string): void;
   setLastResult(r: CommandResult): void;
   reset(): void;
+  /** Copy of the user's measurements, choices and design (for undoing a link that replaced them). */
+  snapshot(): SessionSnapshot;
+  restore(snapshot: SessionSnapshot): void;
+  setLinkNotice(notice: LinkNotice | null): void;
 }
 
 export type AppState = AppData & AppActions;
@@ -107,11 +129,13 @@ export function defaultSelection(): Selection {
   const garment = firstId(GARMENTS, 'a-line-skirt') as GarmentType;
   const styleId = firstId(STYLES, 'parisian-chic');
   const style = STYLES.find((s) => s.id === styleId);
-  const fallbackMaterial = pickPresets({ garment, styleId }).materialId;
+  // The same automatic pick the console and CLI make, so the starting design
+  // never carries a "this cloth is unusual" warning.
+  const materialId = pickPresets({ garment, styleId }).materialId;
   return {
     garment,
     styleId,
-    materialId: firstId(MATERIALS, MATERIALS.some((m) => m.id === 'wool-crepe') ? 'wool-crepe' : fallbackMaterial),
+    materialId,
     occasion: null,
     region: style?.region ?? 'european',
     options: {},
@@ -135,7 +159,13 @@ function defaultData(): AppData {
     consoleLog: [],
     consoleHistory: [],
     lastResult: null,
+    linkNotice: null,
   };
+}
+
+/** True when the snapshot holds something the user would not want to lose silently. */
+export function hasOwnWork(s: SessionSnapshot): boolean {
+  return !s.measurementsAreSample || s.designedRequest !== null;
 }
 
 /** Drop option values the garment does not offer; clamp numbers. */
@@ -411,8 +441,39 @@ export function createAppStore(opts: CreateStoreOptions = {}): AppStore {
 
       reset() {
         // Sewing progress is keyed by design id, so keeping it is harmless and saves work.
-        const { consoleHistory, consoleLog, progress } = get();
-        set({ ...defaultData(), consoleHistory, consoleLog, progress });
+        const { consoleHistory, consoleLog, progress, lastResult, linkNotice } = get();
+        set({ ...defaultData(), consoleHistory, consoleLog, progress, lastResult, linkNotice });
+      },
+
+      snapshot() {
+        const s = get();
+        return {
+          measurements: { ...s.measurements },
+          measurementsAreSample: s.measurementsAreSample,
+          unit: s.unit,
+          selection: { ...s.selection, options: { ...s.selection.options } },
+          pkg: s.pkg,
+          designedRequest: s.designedRequest,
+          designError: s.designError,
+          tab: s.tab,
+        };
+      },
+
+      restore(snap) {
+        set({
+          measurements: { ...snap.measurements },
+          measurementsAreSample: snap.measurementsAreSample,
+          unit: snap.unit,
+          selection: sanitizeSelection(snap.selection),
+          pkg: snap.pkg,
+          designedRequest: snap.designedRequest,
+          designError: snap.designError,
+          tab: snap.tab,
+        });
+      },
+
+      setLinkNotice(notice) {
+        set({ linkNotice: notice });
       },
     };
   };

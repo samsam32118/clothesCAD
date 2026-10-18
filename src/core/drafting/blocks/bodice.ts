@@ -13,7 +13,11 @@
  *   front.
  * - Chest (armhole depth) line at bust/10 + 11.5 cm below the nape, plus fit
  *   ease, always above the bust point.
- * - Front/back widths at the chest line: bust/4 ± 0.75 cm.
+ * - Front/back widths at the chest line: bust/4 ± dx/2. dx starts at 1.5 cm
+ *   (front wider) and is reduced, down to −1 cm, until the back armhole is at
+ *   least as long as the front (target +0.5 cm): a front armhole longer than
+ *   the back pulls the sleeve forward and gapes. The across-front pitch sits
+ *   1 cm inside the shoulder point and higher on the armhole than the back's.
  * - Bust apex from shoulder-to-bust-point and bust-point distance; the bust
  *   dart intake equals how much longer the front is than the back over the
  *   bust (front waist length vs back waist length). The dart sits level with
@@ -37,6 +41,7 @@ import {
   pathLength,
   rotatePath,
   scale,
+  solveMonotone,
   splineThrough,
   splitAtLength,
   sub,
@@ -122,6 +127,13 @@ export interface BodiceFrame {
 }
 
 const DEG = Math.PI / 180;
+
+/** Front-minus-back width at the chest line (cm) when the armholes already balance. */
+const PREFERRED_SIDE_OFFSET = 1.5;
+/** Most the side seam may move forward (negative offset) to balance the armholes. */
+const MIN_SIDE_OFFSET = -1;
+/** Target: back armhole longer than the front by this much (cm). */
+export const ARMHOLE_BACK_EXCESS = 0.5;
 
 interface NeckParams {
   widen: number;
@@ -215,7 +227,6 @@ function sAtY(p: Path, y: number): number {
 
 export function bodiceFrame(inp: BodiceInput): BodiceFrame {
   const r = inp.r;
-  const dx = 1.5;
   const nw = r.neckCm / 6 + 0.3;
   const jewelF = r.neckCm / 6 + 1.2;
   const shoulderEase = inp.knit ? 0 : inp.fit === 'relaxed' ? 0.5 : 0.8;
@@ -234,14 +245,26 @@ export function bodiceFrame(inp: BodiceInput): BodiceFrame {
   let chestY = 2 + 0.1 * r.bustCm + 11.5 + fitAdd + (inp.sleeveless ? -0.5 : 0) + (inp.knit ? -1 : 0);
   chestY = clamp(chestY, Math.max(spB.y, spF.y) + 12, A.y - 1.5);
 
-  const xsF = inp.bustF / 4 + dx / 2;
-  const xsB = inp.bustF / 4 - dx / 2;
-  const acF = Math.min(spF.x - 1.5, xsF - 3);
-  const acB = Math.min(spB.x - 0.8, xsB - 3.5);
-  const sF = { x: xsF, y: chestY };
-  const sB = { x: xsB, y: chestY };
-  const armF = armholePath(spF, thetaF, acF, 0.55, sF);
-  const armB = armholePath(spB, thetaB, acB, 0.45, sB);
+  // Front/back split of the bust at the side seam (front wider by dx). The
+  // front armhole must come out slightly SHORTER than the back (the across-
+  // front is narrower and the front shoulder lower), or the sleeve pulls
+  // forward and the front armhole gapes: reduce dx until it does.
+  const armholes = (d: number) => {
+    const xsF = inp.bustF / 4 + d / 2;
+    const xsB = inp.bustF / 4 - d / 2;
+    const acF = Math.min(spF.x - 1, xsF - 3);
+    const acB = Math.min(spB.x - 0.8, xsB - 3.5);
+    const sF = { x: xsF, y: chestY };
+    const sB = { x: xsB, y: chestY };
+    return { xsF, xsB, sF, sB, armF: armholePath(spF, thetaF, acF, 0.45, sF), armB: armholePath(spB, thetaB, acB, 0.45, sB) };
+  };
+  const balance = (d: number) => {
+    const a = armholes(d);
+    return pathLength(a.armB) - pathLength(a.armF);
+  };
+  let dx = PREFERRED_SIDE_OFFSET;
+  if (balance(dx) < ARMHOLE_BACK_EXCESS) dx = solveMonotone(balance, ARMHOLE_BACK_EXCESS, MIN_SIDE_OFFSET, PREFERRED_SIDE_OFFSET);
+  const { xsB, sB, armF, armB } = armholes(dx);
 
   const backWaistY = 2 + r.backWaistLengthCm;
   let frontWaistY = A.y + (r.frontWaistLengthCm - r.shoulderToBustPointCm);

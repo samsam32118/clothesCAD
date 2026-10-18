@@ -24,6 +24,17 @@ export const ASSEMBLY_STEPS: readonly string[] = [
   'Lay each trimmed edge exactly on the dashed line of the page to its left or above it, so the pattern lines continue, then tape.',
 ];
 
+/** The joining rule in one sentence, for places too small for the full steps. */
+export const ASSEMBLY_SUMMARY =
+  'Trim the left and top margins of each page along the grey frame, lay the trimmed edge on the dashed line of the page to its left or above, and tape.';
+
+/** Plain-language paper guidance: which file/paper to use, and how many sheets come out. */
+export function printSheetsNote(pageCount: number, paper: AssemblyPaper): string {
+  const name = paper === 'A4' ? 'A4' : 'US Letter';
+  const other = paper === 'A4' ? 'US Letter' : 'A4';
+  return `${pageCount + 1} sheets of ${name} paper: sheet 1 is the assembly map, then ${pageCount} pattern page${pageCount === 1 ? '' : 's'}. This version is laid out for ${name} only; for ${other} paper, choose ${other} and print that version instead (the page edges would be cut off otherwise).`;
+}
+
 export interface PageGridInfo {
   /** Label such as "B3". */
   label: string;

@@ -7,6 +7,7 @@ import { EmptyState, PageHead } from '../components/controls';
 import { Check } from '../components/icons';
 import { useActions, useApp, useToast } from '../context';
 import { downloadFile } from '../download';
+import { bomTotals, fabricToBuy, groupBom, type IndexedBomItem } from '../bom';
 import { formatMoney } from '../format';
 import { parseStepBody } from '../stepBody';
 
@@ -194,8 +195,27 @@ function BomCard({ pkg, defaultOpen }: { pkg: DesignPackage; defaultOpen: boolea
   const checked = useApp((s) => s.progress[key]);
   const toggle = useActions().toggleStep;
   const done = new Set(checked ?? []);
-  const total = pkg.bom.reduce((s, b) => s + (b.estCostEur ?? 0), 0);
+  const groups = groupBom(pkg.bom);
+  const totals = bomTotals(pkg.bom);
+  const fabric = fabricToBuy(pkg);
   const fmtQty = (b: BomItem) => `${Number.isInteger(b.quantity) ? b.quantity : b.quantity.toFixed(2)} ${b.unit}`;
+  const renderItems = (items: IndexedBomItem[]) => (
+    <ul className="checklist">
+      {items.map(({ item: b, index }) => (
+        <li key={`${b.name}-${index}`}>
+          <label className="check-row">
+            <input type="checkbox" checked={done.has(index)} onChange={() => toggle(key, index)} />
+            <span>
+              <span style={{ fontWeight: 500 }}>{b.name}</span>
+              {!b.essential ? <span className="tag" style={{ marginLeft: 6 }}>optional</span> : null}
+              {b.spec ? <span className="hint" style={{ display: 'block' }}>{b.spec}</span> : null}
+            </span>
+            <span className="qty">{fmtQty(b)}</span>
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
   return (
     <section className="card" aria-labelledby="bom-title">
       <details className="disclosure plain" open={defaultOpen}>
@@ -206,25 +226,32 @@ function BomCard({ pkg, defaultOpen }: { pkg: DesignPackage; defaultOpen: boolea
             </span>
             <span className="muted small" style={{ display: 'block', fontWeight: 400 }}>
               {done.size} of {pkg.bom.length} ticked
-              {total > 0 ? ` · ≈ ${formatMoney(total)}` : ''} · get these before step 1
+              {totals.materialsEur > 0 ? ` · materials ≈ ${formatMoney(totals.materialsEur)}` : ''} · get these before step 1
             </span>
           </span>
         </summary>
-      <ul className="checklist">
-        {pkg.bom.map((b, i) => (
-          <li key={`${b.name}-${i}`}>
-            <label className="check-row">
-              <input type="checkbox" checked={done.has(i)} onChange={() => toggle(key, i)} />
-              <span>
-                <span style={{ fontWeight: 500 }}>{b.name}</span>
-                {!b.essential ? <span className="tag" style={{ marginLeft: 6 }}>optional</span> : null}
-                {b.spec ? <span className="hint" style={{ display: 'block' }}>{b.spec}</span> : null}
-              </span>
-              <span className="qty">{fmtQty(b)}</span>
-            </label>
-          </li>
-        ))}
-      </ul>
+        <h3 className="bom-group">
+          Materials{totals.materialsEur > 0 ? <span className="muted small"> ≈ {formatMoney(totals.materialsEur)}</span> : null}
+        </h3>
+        {fabric && fabric.layoutM !== null && fabric.buyM > fabric.layoutM + 0.005 ? (
+          <p className="hint">
+            Buy {fabric.buyM.toFixed(2)} m although the layout uses {fabric.layoutM.toFixed(2)} m: the extra covers shrinkage when you pre-wash
+            and straightening the cut end.
+          </p>
+        ) : null}
+        {renderItems(groups.materials)}
+        {groups.tools.length ? (
+          <>
+            <h3 className="bom-group">
+              Tools
+              {totals.essentialToolsEur > 0 ? (
+                <span className="muted small"> ≈ {formatMoney(totals.essentialToolsEur)} if you own none</span>
+              ) : null}
+            </h3>
+            <p className="hint">Reusable equipment: tick off what you already have. Optional tools make the work neater but are not needed.</p>
+            {renderItems(groups.tools)}
+          </>
+        ) : null}
       </details>
     </section>
   );

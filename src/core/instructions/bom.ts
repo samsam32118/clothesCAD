@@ -10,6 +10,7 @@ import {
   seamLengthCm,
   seamRepeats,
   sewInInterfacing,
+  interfacingWidthCm,
   zipInfo,
   type InstructionContext,
 } from './shared';
@@ -20,8 +21,6 @@ import { GOWN_BONING, GOWN_HORSEHAIR, GOWN_WAIST_STAY, WRAP_STAY_TAPE } from '..
 export const FABRIC_MARGIN = 0.1;
 /** Extra margin when the cloth needs matching (checks, large prints). */
 export const MATCHING_MARGIN = 0.1;
-
-const LAYOUT_WIDTH_FALLBACK: Record<FabricLayer, number> = { self: 150, lining: 140, interfacing: 90 };
 
 function midPrice(m: MaterialPreset): number {
   return (m.pricePerMeterEur[0] + m.pricePerMeterEur[1]) / 2;
@@ -126,7 +125,7 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
 
   const organzaInterfacing = sewInInterfacing(m);
   if (hasLayer('interfacing')) {
-    const width = organzaInterfacing ? 114 : LAYOUT_WIDTH_FALLBACK.interfacing;
+    const width = interfacingWidthCm(m);
     const ifM = metresForLayer('interfacing', ctx.layouts, ctx.pieces, width, FABRIC_MARGIN);
     // A gown's interfacing layer is a full sew-in underlining that carries the boning.
     const underlining = ctx.pieces.some((p) => p.layer === 'interfacing' && /underlining/i.test(p.name));

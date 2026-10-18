@@ -10,6 +10,7 @@ import type {
   MaterialPreset,
   StylePreset,
 } from '../core/types';
+import { suitabilityWarnings } from './picks';
 import { buildRequest, isDesignStale, type AppData } from './store';
 
 export function garmentSummary(g: GarmentDefinition) {
@@ -181,6 +182,15 @@ export function optionSubstitutions(pkg: DesignPackage): OptionSubstitution[] {
 /** Plain-language warnings an agent or user should read before trusting the result. */
 export function designWarnings(pkg: DesignPackage): string[] {
   const out: string[] = [];
+  // Explicit choices are checked with the same rules the automatic picks use.
+  out.push(
+    ...suitabilityWarnings({
+      garment: pkg.garment.id,
+      styleId: pkg.style.id,
+      materialId: pkg.material.id,
+      occasion: pkg.request.occasion ?? null,
+    }),
+  );
   for (const s of optionSubstitutions(pkg)) {
     out.push(
       `Option ${s.option}=${String(s.requested)} is not available for a ${pkg.garment.name.toLowerCase()}; ${String(s.used)} was used instead (allowed: ${Array.isArray(s.allowed) ? s.allowed.join(', ') : s.allowed}).`,

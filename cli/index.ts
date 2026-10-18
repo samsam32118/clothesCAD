@@ -24,7 +24,7 @@ import { resolveMeasurementKey, parseLength } from '../src/console/units';
 import { parseDesignRequest } from '../src/core/schema';
 import { validateMeasurements } from '../src/core/measurements';
 import { getGarment, type Region } from '../src/core/presets';
-import { pickPresets } from '../src/console/picks';
+import { pickPresets, suitabilityWarnings } from '../src/console/picks';
 import type { CommandResult, ExportFile } from '../src/console/types';
 import type { DesignPackage, DesignRequest, GarmentOptions, Measurements, Occasion } from '../src/core/types';
 
@@ -178,6 +178,7 @@ async function buildRequestFromFlags(f: DesignFlags): Promise<DesignRequest> {
           occasion,
           region: f.region ?? null,
           styleId: typeof req.styleId === 'string' ? req.styleId : null,
+          materialId: typeof req.materialId === 'string' ? req.materialId : null,
           measurements: measurements as Partial<Measurements>,
         });
         if (!req.styleId) req.styleId = pick.styleId;
@@ -214,6 +215,9 @@ function describePackage(pkg: DesignPackage): string {
     `  quality: ${pkg.quality.length - q.length}/${pkg.quality.length} checks pass`,
     ...q.map((c) => `    ${c.severity}: ${c.message}`),
     ...optionSubstitutions(pkg).map((x) => `  warning: option ${x.option}=${String(x.requested)} is not offered; ${String(x.used)} was used`),
+    ...suitabilityWarnings({ garment: pkg.garment.id, styleId: pkg.style.id, materialId: pkg.material.id, occasion: pkg.request.occasion ?? null }).map(
+      (w) => `  warning: ${w}`,
+    ),
   ].join('\n');
 }
 

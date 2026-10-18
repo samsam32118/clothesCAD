@@ -292,28 +292,107 @@ function waistY(p: PatternPiece): number | null {
 }
 
 /**
+ * Centre-front line of an overlapping (wrap) piece: the x of a notch labelled
+ * "CF", and the direction (+1/−1) from it towards the piece's side seam. The
+ * part of the piece beyond the CF is the overlap that lies on top of the other
+ * front when worn, so it is not part of the garment's girth.
+ */
+function wrapCentre(p: PatternPiece): { x: number; towardSide: 1 | -1 } | null {
+  const cf = p.notches.find((n) => /^cf$/i.test(n.label ?? ''));
+  const side = p.edges.find((e) => e.id === 'side');
+  if (!cf || !side) return null;
+  const pts = edgePoints(p.seamLine, side);
+  if (!pts.length) return null;
+  const sx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
+  return { x: cf.at.x, towardSide: sx >= cf.at.x ? 1 : -1 };
+}
+
+/**
+ * Width taken up at pattern level `y` by the piece's open vertical darts
+ * (legs level with each other, e.g. waist darts): sewn, they add no girth.
+ * Horizontal darts (side bust darts) do not change the width at any level.
+ */
+function openDartWidthAt(p: PatternPiece, y: number): number {
+  let w = 0;
+  for (const d of p.darts) {
+    const legY = (d.legs[0].y + d.legs[1].y) / 2;
+    if (Math.abs(d.legs[0].y - d.legs[1].y) > 0.5 * d.intakeCm) continue;
+    const span = legY - d.apex.y;
+    if (Math.abs(span) < 1e-6) continue;
+    // Levels up to 1 cm past the legs (a sloping waist edge) count as fully open.
+    const t = (y - d.apex.y) / span;
+    if (t > 0 && t <= 1 + 1 / Math.abs(span)) w += d.intakeCm * Math.min(1, t);
+  }
+  return w;
+}
+
+/** Why a pattern circumference could not be measured (for failure messages). */
+type CircumferenceMiss = 'no-pieces' | 'no-waist' | 'not-reached';
+
+/**
  * Garment circumference measured on the flat pattern: the sum over body
  * pieces of their horizontal width at `depth` cm below their waist line,
  * times the number of physical copies. Takes the maximum over a ±band so the
  * fullest level is found even if the drafted landmark is a little higher or
- * lower than the body landmark. Returns null if any piece does not reach.
+ * lower than the body landmark.
+ *
+ * - `crossing`: only pieces whose outline reaches the level take part (a
+ *   gown's bodice ends at the waist, its skirt panels make the hip). Without
+ *   it every piece must reach the level.
+ * - Overlapping fronts (a "CF" notch and a side edge) are measured from the
+ *   centre front to the side only: the crossover beyond the CF lies on top
+ *   of the other front and adds no girth.
  */
-function patternCircumference(pkg: DesignPackage, roles: ReadonlySet<PieceRole>, depth: number, band: number): { cm: number; pieces: number } | null {
-  const pieces = pkg.pieces.filter((p) => p.layer === 'self' && roles.has(p.role));
-  if (!pieces.length) return null;
-  const waists = pieces.map(waistY);
-  if (waists.some((w) => w === null)) return null;
+function patternCircumference(
+  pkg: DesignPackage,
+  roles: ReadonlySet<PieceRole>,
+  depth: number,
+  band: number,
+  opts: { crossing?: boolean } = {},
+): { cm: number; pieces: number } | { miss: CircumferenceMiss } {
+  const all = pkg.pieces.filter((p) => p.layer === 'self' && roles.has(p.role));
+  if (!all.length) return { miss: 'no-pieces' };
+  const withWaist = all.map((p) => ({ p, w: waistY(p) }));
+  const located = withWaist.filter((x): x is { p: PatternPiece; w: number } => x.w !== null);
+  if (!opts.crossing && located.length < all.length) return { miss: 'no-waist' };
+  if (!located.length) return { miss: 'no-waist' };
+  const target = (x: { p: PatternPiece; w: number }, dy: number) => x.w + depth + dy;
+  const reaches = (x: { p: PatternPiece; w: number }, dy: number) => {
+    const b = bounds(x.p.seamLine);
+    const y = target(x, dy);
+    return y >= b.minY && y <= b.maxY;
+  };
+  const pieces = opts.crossing ? located.filter((x) => reaches(x, 0)) : located;
+  if (!pieces.length) return { miss: 'not-reached' };
   let best = -Infinity;
   for (let dy = -band; dy <= band + 1e-9; dy += 0.5) {
     let total = 0;
-    for (let i = 0; i < pieces.length; i++) {
-      const ex = extentAtY(pieces[i].seamLine, (waists[i] as number) + depth + dy);
-      if (!ex) return null;
-      total += (ex.maxX - ex.minX) * multiplicity(pieces[i]);
+    let ok = true;
+    for (const x of pieces) {
+      const ex = extentAtY(x.p.seamLine, target(x, dy));
+      if (!ex) {
+        ok = false;
+        break;
+      }
+      const wrap = wrapCentre(x.p);
+      const width = wrap ? (wrap.towardSide > 0 ? ex.maxX - wrap.x : wrap.x - ex.minX) : ex.maxX - ex.minX;
+      total += Math.max(0, width - openDartWidthAt(x.p, target(x, dy))) * multiplicity(x.p);
     }
-    best = Math.max(best, total);
+    if (ok) best = Math.max(best, total);
   }
+  if (!Number.isFinite(best)) return { miss: 'not-reached' };
   return { cm: best, pieces: pieces.length };
+}
+
+function missText(miss: CircumferenceMiss, what: string): string {
+  switch (miss) {
+    case 'no-pieces':
+      return `no body pieces to measure the ${what} on`;
+    case 'no-waist':
+      return `the ${what} could not be located: a body piece has no waist notch or waist edge`;
+    case 'not-reached':
+      return `no body piece reaches the ${what} level, so the planned finished ${what} is not drafted anywhere`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +614,11 @@ const HIP_STRAIGHT: ReadonlySet<GarmentType> = new Set<GarmentType>([
   'sheath-dress',
   'column-gown',
 ]);
-/** Garments with an overlapping front: flat-pattern circumference counts the overlap twice. */
+/**
+ * Garments with an overlapping front. Their flat fronts include the crossover,
+ * so pattern circumferences are measured from the "CF" notch to the side seam
+ * (see `wrapCentre`); their worn silhouette is checked at the hip like a straight cut.
+ */
 const OVERLAPPING: ReadonlySet<GarmentType> = new Set<GarmentType>(['wrap-dress']);
 
 type EaseKey = 'bust' | 'waist' | 'hip' | 'upperArm' | 'thigh';
@@ -553,11 +636,15 @@ export function easeRange(key: EaseKey, pkg: DesignPackage): [number, number] {
     hip: { fitted: [2.5, 10], regular: [3.5, 14], relaxed: [5, 24] },
     waist: WAIST_FITTED.has(pkg.garment.id)
       ? { fitted: [0.5, 8], regular: [1, 10], relaxed: [1.5, 16] }
-      : { fitted: [0, 45], regular: [0, 45], relaxed: [0, 50] },
+      : { fitted: [0, 10], regular: [0, 14], relaxed: [0, 18] },
     upperArm: { fitted: [3, 12], regular: [4, 14], relaxed: [5, 20] },
     thigh: { fitted: [4, 16], regular: [5, 22], relaxed: [7, 30] },
   };
   let [lo, hi] = tables[key][fit];
+  // A boned woven gown bodice is fitted whatever the fit preference (see the gown check in scoreFit).
+  if (pkg.garment.category === 'gown' && pkg.material.construction === 'woven' && (key === 'bust' || key === 'waist')) {
+    [lo, hi] = key === 'bust' ? [1.5, 3] : [0.5, 1.5];
+  }
   const mod = pkg.style.silhouette.easeModifierCm;
   if (mod > 0) hi += mod;
   if (mod < 0) lo += mod;
@@ -571,7 +658,48 @@ export function easeRange(key: EaseKey, pkg: DesignPackage): [number, number] {
     };
     lo = -0.15 * body[key];
   }
+  if (key === 'waist' && !WAIST_FITTED.has(pkg.garment.id)) hi = Math.max(hi, skimmingWaistFloor(pkg));
   return [round3(lo), round3(hi)];
+}
+
+/** Most a dartless side seam can take in from bust/hip to waist, all four side-seam edges together (cm). */
+export const SIDE_SEAM_SUPPRESSION_MAX_CM = 12;
+
+/**
+ * Smallest waist ease a skimming (not waist-fitted) garment can physically
+ * have, which may exceed the comfort range on a defined waist:
+ * - without vertical waist darts, the side seams alone can take in only
+ *   `SIDE_SEAM_SUPPRESSION_MAX_CM` from the smaller of finished bust and hip;
+ * - if the opening stops above the waist (no zip, or a short neck zip), the
+ *   body of the garment must slip over the bust (and hip, if it reaches it).
+ */
+export function skimmingWaistFloor(pkg: DesignPackage): number {
+  const r = pkg.measurements;
+  const L = pkg.body.landmarks;
+  const f = pkg.fit.finished;
+  const tol = 0.5;
+  let floor = -Infinity;
+  const vertical = pkg.pieces
+    .filter((p) => p.layer === 'self' && BODICE_ROLES.has(p.role))
+    .some((p) => p.darts.some((d) => Math.abs(d.legs[0].y - d.legs[1].y) <= 0.5 * d.intakeCm));
+  if (!vertical && f.bust !== undefined) {
+    floor = Math.min(f.bust, f.hip ?? f.bust) - SIDE_SEAM_SUPPRESSION_MAX_CM - r.waistCm + tol;
+  }
+  const zipSeams = pkg.seams.filter((s) => ZIP_TYPES.has(s.type));
+  const zipEdges = new Map<string, number>();
+  for (const s of zipSeams) {
+    const e = edgeOf(pkg, s.a);
+    if (e) zipEdges.set(`${e.piece.id}.${e.edge.id}`, measuredLength(e.piece, e.edge));
+  }
+  const zipLen = [...zipEdges.values()].reduce((a, b) => a + b, 0);
+  const fullOpening = pkg.fit.options.closure === 'buttons' || pkg.fit.options.closure === 'wrap-tie';
+  const opensPastWaist = fullOpening || zipLen >= L.nape - L.waist - 2;
+  if (!opensPastWaist && pkg.material.construction === 'woven') {
+    const reachesHip = pkg.silhouette.hemHeightCm <= L.hip + 1;
+    const pass = Math.max(r.bustCm, reachesHip ? r.hipCm : 0) + 3;
+    floor = Math.max(floor, pass - r.waistCm + tol);
+  }
+  return floor;
 }
 
 export function scoreFit(pkg: DesignPackage): MetricResult {
@@ -595,14 +723,14 @@ export function scoreFit(pkg: DesignPackage): MetricResult {
     m.check('arithmetic', Math.abs(fin - body - e[k]) <= 0.5, `finished ${k} ${f1(fin)} − body ${f1(body)} = ${f1(fin - body)} cm but fit.ease.${k} = ${f1(e[k])}`);
   }
   if (!lower) m.check('arithmetic', f.bust !== undefined, 'bodiced garment has no finished bust');
-  m.check('arithmetic', f.waist !== undefined && f.hip !== undefined, 'finished waist/hip missing');
+  m.check('arithmetic', f.waist !== undefined, 'finished waist missing');
   if (!Object.values(e).every(Number.isFinite)) m.fail('arithmetic', `non-finite ease values ${JSON.stringify(e)}`);
 
   // ranges
   const ranged: EaseKey[] = [];
   if (!lower) ranged.push('bust');
   if (!elastic) ranged.push('waist');
-  if (!(cat === 'top' && f.hip === undefined)) ranged.push('hip');
+  if (f.hip !== undefined) ranged.push('hip');
   if (pkg.fit.options.sleeve !== 'none' && pkg.pieces.some((p) => p.role === 'sleeve')) ranged.push('upperArm');
   if (cat === 'trousers') ranged.push('thigh');
   for (const k of ranged) {
@@ -612,8 +740,9 @@ export function scoreFit(pkg: DesignPackage): MetricResult {
 
   // A woven gown bodice carries a heavy skirt: it must be close-fitting.
   if (cat === 'gown' && pkg.material.construction === 'woven') {
-    m.check('ranges', e.bust <= 5.05, `gown bodice bust ease ${f1(e.bust)} cm > 5 cm: the bodice would slide down under the skirt's weight`);
-    m.check('ranges', e.waist <= 2.05, `gown waist ease ${f1(e.waist)} cm > 2 cm: the waist seam would drop`);
+    // Couture boned bodice: 1.5–3 cm at the bust, 0–1.5 cm at the waist (the waist stay carries the skirt).
+    m.check('ranges', e.bust <= 3.05, `gown bodice bust ease ${f1(e.bust)} cm > 3 cm: the bodice would slide down under the skirt's weight and the neckline would gape`);
+    m.check('ranges', e.waist <= 1.55, `gown waist ease ${f1(e.waist)} cm > 1.5 cm: the waist seam would drop`);
   }
   // Knits with real stretch are drafted on the knit block: near-zero ease, no darts.
   if (pkg.material.construction === 'knit' && pkg.material.stretchPct >= 20 && !lower) {
@@ -628,23 +757,32 @@ export function scoreFit(pkg: DesignPackage): MetricResult {
 
   // pattern-measured circumferences
   const L = pkg.body.landmarks;
-  if (f.hip !== undefined && !OVERLAPPING.has(pkg.garment.id)) {
-    const roles = cat === 'top' ? BODICE_ROLES : BODY_ROLES;
-    const pc = patternCircumference(pkg, roles, L.waist - L.hip, 1.5);
-    if (pc) {
-      if (HIP_STRAIGHT.has(pkg.garment.id)) {
+  const hemH = pkg.silhouette.hemHeightCm;
+  const topH = pkg.silhouette.topHeightCm;
+  // The garment covers the hip only if its hem sits below the hip line (1 cm tolerance).
+  const coversHip = hemH <= L.hip + 1;
+  if (f.hip !== undefined) {
+    if (!coversHip) {
+      m.fail('pattern', `the plan sets a finished hip of ${f1(f.hip)} cm, but the hem (${f1(hemH)} cm from the floor) ends above the hip line (${f1(L.hip)} cm): a hip the garment never reaches cannot be fitted or checked`);
+    } else {
+      const roles = cat === 'top' ? BODICE_ROLES : BODY_ROLES;
+      const pc = patternCircumference(pkg, roles, L.waist - L.hip, 1.5, { crossing: true });
+      if ('miss' in pc) m.fail('pattern', missText(pc.miss, 'hip'));
+      else if (HIP_STRAIGHT.has(pkg.garment.id)) {
         m.check('pattern', Math.abs(pc.cm - f.hip) <= 1, `pattern hip ${f1(pc.cm)} cm ≠ planned finished hip ${f1(f.hip)} (±1)`);
       } else {
         m.check('pattern', pc.cm >= f.hip - 1, `pattern hip ${f1(pc.cm)} cm is smaller than the planned finished hip ${f1(f.hip)}`);
       }
     }
+  } else if (coversHip && cat !== 'top') {
+    m.fail('arithmetic', `the garment reaches below the hip line but the plan has no finished hip`);
   }
-  if (f.bust !== undefined && !OVERLAPPING.has(pkg.garment.id)) {
+  if (f.bust !== undefined) {
     const pc = patternCircumference(pkg, BODICE_ROLES, -(L.bust - L.waist), 2.5);
-    if (pc) m.check('pattern', Math.abs(pc.cm - f.bust) <= 1, `pattern bust ${f1(pc.cm)} cm ≠ planned finished bust ${f1(f.bust)} (±1)`);
-    else m.fail('pattern', 'bust level could not be located on the bodice pieces (no waist notch/edge or pieces do not reach the bust)');
+    if ('miss' in pc) m.fail('pattern', missText(pc.miss, 'bust'));
+    else m.check('pattern', Math.abs(pc.cm - f.bust) <= 1, `pattern bust ${f1(pc.cm)} cm ≠ planned finished bust ${f1(f.bust)} (±1)`);
   }
-  if (f.waist !== undefined && !elastic && !OVERLAPPING.has(pkg.garment.id)) {
+  if (f.waist !== undefined && !elastic) {
     const band = pkg.pieces.find((p) => p.role === 'waistband' && p.layer === 'self');
     if (band) {
       const joined = pkg.seams
@@ -657,27 +795,37 @@ export function scoreFit(pkg: DesignPackage): MetricResult {
     } else if (!lower) {
       // Bodice pieces only: a skirt below a waist seam may be gathered or flared into it.
       const pc = patternCircumference(pkg, BODICE_ROLES, 0, 0);
-      if (pc) m.check('pattern', Math.abs(pc.cm - f.waist) <= 1, `pattern waist ${f1(pc.cm)} cm ≠ planned finished waist ${f1(f.waist)} (±1)`);
+      if ('miss' in pc) m.fail('pattern', missText(pc.miss, 'waist'));
+      else m.check('pattern', Math.abs(pc.cm - f.waist) <= 1, `pattern waist ${f1(pc.cm)} cm ≠ planned finished waist ${f1(f.waist)} (±1)`);
+    } else {
+      m.fail('pattern', `a ${cat} with a ${pkg.fit.options.closure} closure has no waistband to carry the planned ${f1(f.waist)} cm waist`);
     }
   }
 
-  // silhouette (3D input) agrees with the plan where it covers the landmark
+  // silhouette (3D input) agrees with the plan wherever the garment covers the landmark
   const rings = pkg.silhouette.torso;
   const knit = pkg.material.construction === 'knit';
   const bodyRings = rings.map((x) => ({ ...x, circumferenceCm: x.bodyCircumferenceCm }));
   const check3d = (name: string, h: number, fin: number | undefined, tol: number) => {
-    if (fin === undefined || h > pkg.silhouette.topHeightCm || h < pkg.silhouette.hemHeightCm) return;
+    if (fin === undefined || h > topH || h < hemH) return;
     const c = ringCircumferenceAt(rings, h);
-    if (c === null) return;
+    if (c === null) {
+      m.fail('silhouette', `the garment spans the ${name} (${f1(h)} cm from the floor) but its silhouette has no ring there`);
+      return;
+    }
     // A knit with negative ease is stretched onto the body when worn: it cannot be smaller than the body there.
     const bodyC = ringCircumferenceAt(bodyRings, h) ?? 0;
     const expected = knit ? Math.max(fin, bodyC) : fin;
     m.check('silhouette', Math.abs(c - expected) <= tol, `silhouette ring at the ${name} (${f1(h)} cm) is ${f1(c)} cm but the worn garment there should be ${f1(expected)} cm${knit && bodyC > fin ? ' (knit stretched to the body)' : ''}`);
   };
-  if (!OVERLAPPING.has(pkg.garment.id)) {
-    check3d('bust', L.bust, f.bust, 2);
-    if (!elastic) check3d('waist', L.waist, f.waist, 2);
-    if (HIP_STRAIGHT.has(pkg.garment.id)) check3d('hip', L.hip, f.hip, 2);
+  check3d('bust', L.bust, f.bust, 2);
+  if (!elastic) check3d('waist', L.waist, f.waist, 2);
+  if (HIP_STRAIGHT.has(pkg.garment.id) || cat === 'top' || OVERLAPPING.has(pkg.garment.id)) check3d('hip', L.hip, f.hip, 2);
+  else if (f.hip !== undefined && L.hip <= topH && L.hip >= hemH) {
+    // Flared garments: the worn garment at the hip is at least the planned hip.
+    const c = ringCircumferenceAt(rings, L.hip);
+    if (c === null) m.fail('silhouette', `the garment spans the hip (${f1(L.hip)} cm) but its silhouette has no ring there`);
+    else m.check('silhouette', c >= f.hip - 2, `silhouette ring at the hip (${f1(L.hip)} cm) is ${f1(c)} cm, smaller than the planned finished hip ${f1(f.hip)}`);
   }
   return m.result();
 }
@@ -802,12 +950,27 @@ export function scoreWearability(pkg: DesignPackage): MetricResult {
   }
 
   // Walking: hems below the knee need width or a vent / slit / opening edge.
-  if (cat !== 'top' && cat !== 'trousers' && pkg.fit.finished.hem !== undefined) {
-    const hasVent = fullOpening || pkg.pieces.some((p) => p.edges.some((x) => x.kind === 'opening' || /vent|slit/.test(x.id)));
-    const need = strideNeedCm(pkg, pkg.fit.hemHeightFromFloorCm);
-    if (need > 0 && !hasVent) {
-      m.check('stride', pkg.fit.finished.hem * k >= need, `hem circumference ${f1(pkg.fit.finished.hem)} cm is too narrow to walk (needs ≈ ${f1(need)} cm) and there is no vent or slit`);
-    } else m.check('stride', true, '');
+  // A vent or slit only counts if it is an opening of the outer (self) skirt
+  // that starts at the hem; it moves the stride requirement up to its top,
+  // where the closed garment must be wide enough for the (smaller) spread there.
+  if (cat !== 'top' && cat !== 'trousers' && pkg.fit.finished.hem !== undefined && !fullOpening) {
+    const hemH0 = pkg.fit.hemHeightFromFloorCm;
+    const need = strideNeedCm(pkg, hemH0);
+    if (need > 0) {
+      const vent = longestHemVent(pkg);
+      if (!vent) {
+        m.check('stride', pkg.fit.finished.hem * k >= need, `hem circumference ${f1(pkg.fit.finished.hem)} cm is too narrow to walk (needs ≈ ${f1(need)} cm) and there is no vent or slit`);
+      } else {
+        const ventTop = hemH0 + vent.lengthCm;
+        const needTop = strideNeedCm(pkg, ventTop);
+        const atTop = ringCircumferenceAt(rings, ventTop) ?? pkg.fit.finished.hem;
+        m.check(
+          'stride',
+          pkg.fit.finished.hem * k >= need || atTop * k >= needTop,
+          `the ${f1(vent.lengthCm)} cm ${vent.id} (${vent.pieceId}) is too short: at its top (${f1(ventTop)} cm from the floor) the skirt measures ${f1(atTop)} cm but a stride needs ≈ ${f1(needTop)} cm there`,
+        );
+      }
+    }
   }
 
   // Sleeves: must fit the upper arm.
@@ -821,6 +984,33 @@ export function scoreWearability(pkg: DesignPackage): MetricResult {
     m.check('sit', pkg.fit.ease.hip >= 2.5, `woven hip ease ${f1(pkg.fit.ease.hip)} cm is too little to sit down (≥ 2.5 cm)`);
   }
   return m.result();
+}
+
+/**
+ * Longest vent or slit in the outer garment: an edge of kind 'opening' (or
+ * named vent/slit) on a self piece below the waist, sharing an end point with
+ * that piece's hem edge. Its length is the vertical rise it opens above the hem.
+ * Zip openings and lining openings never count.
+ */
+function longestHemVent(pkg: DesignPackage): { pieceId: string; id: string; lengthCm: number } | null {
+  const zipEdges = new Set(
+    pkg.seams.filter((s) => ZIP_TYPES.has(s.type)).flatMap((s) => [s.a, ...(s.b ? [s.b] : [])].map((x) => `${x.pieceId}.${x.edgeId}`)),
+  );
+  let best: { pieceId: string; id: string; lengthCm: number } | null = null;
+  for (const p of pkg.pieces) {
+    if (p.layer !== 'self' || !LOWER_ROLES.has(p.role)) continue;
+    const hems = p.edges.filter((e) => e.kind === 'hem');
+    for (const e of p.edges) {
+      if (!(e.kind === 'opening' || /vent|slit/.test(e.id)) || /zip/.test(e.id) || zipEdges.has(`${p.id}.${e.id}`)) continue;
+      const ends = [e.from, e.to];
+      if (!hems.some((h) => ends.includes(h.from) || ends.includes(h.to))) continue;
+      const pts = edgePoints(p.seamLine, e);
+      const ys = pts.map((q) => q.y);
+      const rise = Math.max(...ys) - Math.min(...ys);
+      if (!best || rise > best.lengthCm) best = { pieceId: p.id, id: e.id, lengthCm: rise };
+    }
+  }
+  return best;
 }
 
 /** Roles below the waist whose cut width is the fabric available to pass the hips. */
@@ -837,7 +1027,10 @@ function narrowestCapacity(pkg: DesignPackage, lo: number, hi: number): { c: num
   let best: { c: number; h: number } | null = null;
   for (let h = lo; h <= hi + 1e-9; h += 0.5) {
     let c: number | null = null;
-    if (h < L.waist - 0.25) c = patternCircumference(pkg, LOWER_ROLES, L.waist - h, 0)?.cm ?? null;
+    if (h < L.waist - 0.25) {
+      const pc = patternCircumference(pkg, LOWER_ROLES, L.waist - h, 0);
+      if (!('miss' in pc)) c = pc.cm;
+    }
     if (c === null) c = ringCircumferenceAt(pkg.silhouette.torso, h);
     if (c === null) continue;
     if (!best || c < best.c) best = { c, h };

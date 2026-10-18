@@ -19,7 +19,7 @@ import { edgeFacing, pocketBag, stripPiece, tiePiece, type StripSegment } from '
 import { STAGE, ZIP_END_ALLOWANCE_CM } from '../seams';
 import { buildSilhouette, type Knot } from '../silhouette';
 import { arc, cubicBezier, dedupe, lerp, pathLength, rotatePath, sub, normalize, add, scale } from '../../geometry';
-import { ballGownGatherRatio, ballGownWaistTreatment, KNIT_BLOCK_STRETCH_PCT, strideHemNeeded } from '../../fit/plan';
+import { ballGownGatherRatio, ballGownWaistTreatment, isFineShell, KNIT_BLOCK_STRETCH_PCT, SHORT_SLEEVE_UNDERSEAM_MIN, strideHemNeeded } from '../../fit/plan';
 import { headCircumference } from '../../measurements';
 import {
   addDartSeams,
@@ -67,6 +67,8 @@ interface Ctx {
   pullOn: boolean;
   /** Stretch knit drafted on the dartless knit block. */
   knitBlock: boolean;
+  /** Neckline finished with a binding instead of facings (knits; fine pull-on silks). */
+  boundNeck: boolean;
   type: DraftContext['garment']['id'];
 }
 
@@ -77,13 +79,16 @@ function makeCtx(ctx: DraftContext): Ctx {
     g,
     bustF: fit.finished.bust ?? g.r.bustCm + 8,
     waistF: fit.finished.waist ?? g.r.waistCm + 6,
-    hipF: fit.finished.hip ?? g.r.hipCm + 6,
-    hemF: fit.finished.hem ?? (fit.finished.hip ?? g.r.hipCm + 6),
+    // Tops that end above the hip have no planned finished hip; their side seams
+    // still head for the hip at the planned hip ease.
+    hipF: fit.finished.hip ?? g.r.hipCm + fit.ease.hip,
+    hemF: fit.finished.hem ?? (fit.finished.hip ?? g.r.hipCm + fit.ease.hip),
     belowWaist: g.L.waist - fit.hemHeightFromFloorCm,
     sleeveless: fit.options.sleeve === 'none',
     lined: fit.options.lining && !g.knit,
     pullOn: g.closure === 'none',
     knitBlock: g.knit && g.material.stretchPct >= KNIT_BLOCK_STRETCH_PCT,
+    boundNeck: !(fit.options.lining && !g.knit) && (g.knit || isFineShell(ctx.garment, ctx.material)),
     type: ctx.garment.id,
   };
 }
@@ -100,7 +105,9 @@ function frameFor(c: Ctx, lower: Omit<LowerInput, 'hipF' | 'highHipF' | 'hipDept
     knit: g.knit,
     sleeveless: c.sleeveless,
     neckline: g.fit.options.neckline,
-    minNeckOpening: c.pullOn ? headCircumference(r.heightCm) + (g.knit ? 0 : 4) : undefined,
+    // A woven bias binding is cut shorter than the edge (BIAS_BINDING_SHORTEN),
+    // which draws a bound neck in by that much: draft the neck larger to suit.
+    minNeckOpening: c.pullOn ? (headCircumference(r.heightCm) + (g.knit ? 0 : 4)) / (c.boundNeck && !g.knit ? 1 - BIAS_BINDING_SHORTEN : 1) : undefined,
     waistDarts,
     knitBlock: c.knitBlock,
     lower: lower
@@ -149,17 +156,23 @@ function sleevePiece(c: Ctx, f: BodiceFrame, segments: ArmholeSegment[]): { draf
   const { g } = c;
   const upperArmF = g.r.upperArmCm + (g.fit.ease.upperArm || 6);
   const elbowFromTop = 0.56 * g.r.armLengthCm;
-  const s = draftSleeve({
+  const sleeveInput = (length: number) => ({
     segments,
     upperArmF,
     capEase: capEaseFor(c),
     armholeDepth: f.chestY - (f.spF.y + f.spB.y) / 2,
-    length: g.fit.finished.sleeveLength ?? 0.3 * g.r.armLengthCm,
+    length,
     hemCirc: sleeveHem(c, upperArmF),
     elbowFromTop: g.fit.options.sleeve === 'long' || g.fit.options.sleeve === 'three-quarter' ? elbowFromTop : undefined,
     // knit block: low, wide cap (the knit stretches over the shoulder)
     maxCapHeightFrac: c.knitBlock ? 0.6 : undefined,
   });
+  const planned = g.fit.finished.sleeveLength ?? 0.3 * g.r.armLengthCm;
+  let s = draftSleeve(sleeveInput(planned));
+  // The plan estimates the cap height; the drafted cap decides. A short sleeve
+  // keeps an underarm seam long enough to hang down the arm.
+  const under = pathLength(s.underarmFront);
+  if (g.fit.options.sleeve === 'short' && under < SHORT_SLEEVE_UNDERSEAM_MIN) s = draftSleeve(sleeveInput(planned + SHORT_SLEEVE_UNDERSEAM_MIN - under));
   const edges: EdgeDraft[] = [
     ...s.capSections.map((x) => ({ id: x.id, kind: 'seam' as const, points: x.points })),
     { id: 'underarm-back', kind: 'seam', points: s.underarmBack },
@@ -218,10 +231,23 @@ function useBindingAllowance(c: Ctx, drafts: PieceDraft[], refs: ReadonlyArray<{
   }
 }
 
+/**
+ * How much shorter a woven bias binding is cut than the concave edge it
+ * binds (armholes, necklines): stretched on, it pulls the edge in to lie
+ * flat against the body instead of rolling and gaping.
+ */
+export const BIAS_BINDING_SHORTEN = 0.06;
+/** Knit bindings are cut 10 % shorter and stretched on. */
+const KNIT_BINDING_SHORTEN = 0.1;
+
+function bindingShorten(c: Ctx): number {
+  return c.g.knit ? KNIT_BINDING_SHORTEN : BIAS_BINDING_SHORTEN;
+}
+
 /** Binding strip with one segment per garment edge. */
 function bindingPiece(c: Ctx, id: string, name: string, built: PatternPiece[], parts: Array<{ pieceId: string; edgeId: string; seg: string; label?: string }>, cutCount: number): PieceDraft {
   const knit = c.g.knit;
-  const factor = knit ? 0.9 : 1;
+  const factor = 1 - bindingShorten(c);
   const segments: StripSegment[] = parts.map((p) => ({ edgeId: p.seg, length: edgeLen(built, p.pieceId, p.edgeId) * factor, notchLabel: p.label }));
   return stripPiece({
     id,
@@ -242,10 +268,10 @@ function addBindingSeams(c: Ctx, bindingId: string, parts: Array<{ pieceId: stri
   const B = c.g.book;
   for (const p of parts) {
     const garmentLen = edgeLen(built, p.pieceId, p.edgeId);
-    const ease = c.g.knit ? garmentLen * 0.1 : 0;
+    const ease = garmentLen * bindingShorten(c);
     B.join(`${bindingId}-${p.seg}`, [p.pieceId, p.edgeId], [bindingId, p.seg], stage, {
       ease,
-      note: c.g.knit ? `Stretch the binding slightly (it is ${ease.toFixed(1)} cm shorter) so it lies flat against the body.` : undefined,
+      note: `Stretch the binding slightly as you sew (it is ${ease.toFixed(1)} cm shorter than the edge) so the curved edge is drawn in and lies flat against the body instead of rolling outwards.`,
     });
   }
   if (loop) B.join(`${bindingId}-ends`, [bindingId, 'end-start'], [bindingId, 'end-end'], stage - 1, { note: `Join the ${what} binding into a ring before attaching.` });
@@ -439,7 +465,7 @@ export function draftBlockDress(ctx: DraftContext): DraftResult {
     if (pe) drafts.push(pocketBag({ id: 'pocket-bag', name: 'Pocket bag', layer: c.lined ? 'lining' : 'self', attach: pe.points, interiorRight: false, seamAllowanceCm: g.sa }));
   }
   if (c.sleeveless && !c.lined) useBindingAllowance(c, drafts, [{ pieceId: 'front', edgeId: 'armhole' }, { pieceId: 'back', edgeId: 'armhole' }]);
-  if (g.knit && !c.lined) useBindingAllowance(c, drafts, neckBindingParts());
+  if (c.boundNeck) useBindingAllowance(c, drafts, neckBindingParts());
   let built = fitFolds(g, drafts).map(buildPiece);
   let sleeveSections: ReturnType<typeof draftSleeve>['capSections'] = [];
   const more: PieceDraft[] = [];
@@ -458,9 +484,10 @@ export function draftBlockDress(ctx: DraftContext): DraftResult {
       ], 2),
     );
   }
-  const knitNeck = g.knit && !c.lined;
+  const knitNeck = c.boundNeck;
   if (knitNeck) {
-    // replace woven facings by a knit neck binding
+    // A binding instead of facings: knits, and fine silks where a facing and
+    // its interfacing would shadow through and add bulk.
     built = built.filter((p) => !p.id.includes('facing'));
     more.push(
       bindingPiece(c, 'neck-binding', 'Neck binding', built, neckBindingParts(), 1),

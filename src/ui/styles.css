@@ -1740,3 +1740,36 @@ table.data td.num {
     transition: none !important;
   }
 }
+
+/* Shopping list: materials vs reusable tools */
+.bom-group {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 14px 0 4px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bom-group .small {
+  font-weight: 400;
+}
+
+/* Outcome of a #cmd= link (agent link opened by a person) */
+.link-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+.link-banner > span:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.link-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

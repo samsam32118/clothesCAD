@@ -4,6 +4,7 @@ import type { DesignPackage, GarmentDefinition, GarmentOptions, MaterialPreset, 
 import { currentBody, rankMaterials } from '../../console/picks';
 import { isDesignStale } from '../../console/store';
 import { formatMinutes } from '../../console/summary';
+import { bomTotals, fabricToBuy } from '../bom';
 import { formatLength, type UnitSystem } from '../../console/units';
 import { ChipGroup, Dots, PageHead, Segmented, Switch } from '../components/controls';
 import { CATEGORY_LABEL, GarmentIcon } from '../components/icons';
@@ -145,8 +146,8 @@ function OptionsCard({ garment, options, styleFit }: { garment: GarmentDefinitio
 
 export function FitRationaleCard({ pkg, unit, stale }: { pkg: DesignPackage; unit: UnitSystem; stale: boolean }) {
   const setTab = useActions().setTab;
-  const fabric = pkg.layouts.find((l) => l.layer === 'self');
-  const cost = pkg.bom.reduce((sum, b) => sum + (b.estCostEur ?? 0), 0);
+  const fabric = fabricToBuy(pkg);
+  const cost = bomTotals(pkg.bom);
   const fin = pkg.fit.finished;
   const rows: Array<[string, number | undefined]> = [
     ['Bust', fin.bust],
@@ -177,8 +178,8 @@ export function FitRationaleCard({ pkg, unit, stale }: { pkg: DesignPackage; uni
           <span>fit</span>
         </div>
         <div className="stat">
-          <b>{fabric ? `${(fabric.lengthCm / 100).toFixed(2)} m` : '–'}</b>
-          <span>fabric</span>
+          <b>{fabric ? `${fabric.buyM.toFixed(2)} m` : '–'}</b>
+          <span>fabric to buy</span>
         </div>
         <div className="stat">
           <b>{formatMinutes(pkg.effort.minutes)}</b>
@@ -188,13 +189,26 @@ export function FitRationaleCard({ pkg, unit, stale }: { pkg: DesignPackage; uni
           <b>{pkg.effort.difficulty}/5</b>
           <span>difficulty</span>
         </div>
-        {cost > 0 ? (
+        {cost.materialsEur > 0 ? (
           <div className="stat">
-            <b>{formatMoney(cost)}</b>
-            <span>est. materials</span>
+            <b>≈ {formatMoney(cost.materialsEur)}</b>
+            <span>materials</span>
+          </div>
+        ) : null}
+        {cost.essentialToolsEur > 0 ? (
+          <div className="stat">
+            <b>≈ {formatMoney(cost.essentialToolsEur)}</b>
+            <span>tools if needed</span>
           </div>
         ) : null}
       </div>
+      {fabric && fabric.layoutM !== null && fabric.buyM > fabric.layoutM + 0.005 ? (
+        <p className="hint" style={{ marginTop: 8 }}>
+          The cutting layout uses {fabric.layoutM.toFixed(2)} m of {pkg.material.widthCm} cm wide cloth; buy {fabric.buyM.toFixed(2)} m to allow
+          for shrinkage when you pre-wash it and for straightening the cut end. Materials are the cloth, interfacing, notions and thread;
+          tools are reusable, so skip any you already own.
+        </p>
+      ) : null}
       <ul className="rationale">
         {pkg.fit.rationale.map((r, i) => (
           <li key={i}>{r}</li>

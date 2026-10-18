@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createAgentAPI, stripFiles, type AgentAPI } from './console/api';
 import { executeScript } from './console/commands';
-import { createAppStore, safeLocalStorage, type AppStore } from './console/store';
+import { createAppStore, hasOwnWork, safeLocalStorage, type AppStore } from './console/store';
 import type { CommandResult } from './console/types';
 import { App } from './ui/App';
 import { ErrorBoundary } from './ui/components/ErrorBoundary';
@@ -50,19 +50,64 @@ function hashScript(): HashScript | null {
   return { commands: cmd, keep: keep === '1' || keep === 'true' };
 }
 
+/** Ensure a message ends like a sentence so text can follow it. */
+function sentence(text: string): string {
+  const t = text.trim();
+  return /[.!?:)]$/.test(t) ? t : `${t}.`;
+}
+
 /**
  * Run the hash script. For reproducible agent links it starts from the
  * default state (measurements, choices and design reset; sewing progress and
  * console history kept) unless `keep=1` is given. The hash is removed
  * afterwards so reloading the page does not run the commands again.
+ *
+ * A person may open such a link on top of their own work, so the state from
+ * before the link is kept aside:
+ * - if any command fails, that state is put back (a broken link never costs
+ *   the user their measurements) and a banner names the failing command;
+ * - if the link succeeds and replaced the user's own measurements or design,
+ *   the banner offers to undo it.
+ * Agents still read the failure from <pre id="agent-output" data-ok="false">.
  */
 async function runHash(store: AppStore): Promise<void> {
   const script = hashScript();
   if (!script) return;
   document.documentElement.dataset.clothescad = 'running';
+  const before = store.getState().snapshot();
+  store.getState().setLinkNotice(null);
   if (!script.keep) store.getState().reset();
   try {
-    await executeScript(script.commands, { store }, { source: 'hash', stopOnError: true });
+    const results = await executeScript(script.commands, { store }, { source: 'hash', stopOnError: true });
+    const failed = results.find((r) => !r.ok);
+    const st = store.getState();
+    if (failed) {
+      if (!script.keep) st.restore(before);
+      st.setLinkNotice({
+        ok: false,
+        failedCommand: failed.command,
+        message: script.keep
+          ? `The link's command “${failed.command}” failed: ${sentence(failed.message)} Commands before it were applied; the rest did not run.`
+          : `The link's command “${failed.command}” failed: ${sentence(failed.message)} Nothing was changed: your own measurements and design are as you left them.`,
+        undo: null,
+      });
+    } else if (!script.keep && hasOwnWork(before)) {
+      st.setLinkNotice({
+        ok: true,
+        failedCommand: null,
+        message: `A link ran ${results.length} command${results.length === 1 ? '' : 's'} and replaced your measurements and design.`,
+        undo: before,
+      });
+    }
+  } catch (err) {
+    if (!script.keep) store.getState().restore(before);
+    store.getState().setLinkNotice({
+      ok: false,
+      failedCommand: null,
+      message: `The link's commands could not run: ${err instanceof Error ? err.message : String(err)}`,
+      undo: null,
+    });
+    throw err;
   } finally {
     try {
       window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}`);

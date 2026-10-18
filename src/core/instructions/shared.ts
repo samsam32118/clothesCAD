@@ -308,6 +308,11 @@ export function sewInInterfacing(m: MaterialPreset): boolean {
   return /^(silk organza|sew-in)/i.test(s) || /sew-in only/i.test(s);
 }
 
+/** Usable width (cm) of the interfacing bought for a main fabric: silk organza 114 cm, fusible 90 cm. */
+export function interfacingWidthCm(m: MaterialPreset): number {
+  return sewInInterfacing(m) ? 114 : 90;
+}
+
 /** Multiplier on sewing time for harder fabrics (beginnerFriendliness 5 -> 1.0, 1 -> ~1.5). */
 export function materialTimeFactor(m: MaterialPreset): number {
   return 1 + (5 - m.beginnerFriendliness) * 0.12;

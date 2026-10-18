@@ -79,6 +79,36 @@ function TabBar({ tab, onChange }: { tab: TabId; onChange: (t: TabId) => void })
   );
 }
 
+/** Result of a `#cmd=` link, so a person who opened one sees what happened (and can undo it). */
+function LinkBanner() {
+  const notice = useApp((s) => s.linkNotice);
+  const { restore, setLinkNotice } = useActions();
+  if (!notice) return null;
+  const undo = notice.undo;
+  return (
+    <div className={`notice link-banner ${notice.ok ? '' : 'error'}`} role={notice.ok ? 'status' : 'alert'}>
+      <span>{notice.message}</span>
+      <span className="link-banner-actions">
+        {undo ? (
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => {
+              restore(undo);
+              setLinkNotice(null);
+            }}
+          >
+            Restore my measurements
+          </button>
+        ) : null}
+        <button type="button" className="btn small" onClick={() => setLinkNotice(null)}>
+          Dismiss
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function Status() {
   const pkg = useApp((s) => s.pkg);
   const stale = useApp((s) => isDesignStale(s));
@@ -112,6 +142,7 @@ export function App() {
           <Status />
         </header>
         <main className="content" id="panel" role="tabpanel" aria-labelledby={`tab-${tab}`} ref={main} tabIndex={-1}>
+          <LinkBanner />
           <ErrorBoundary area={TAB_LABEL[tab]} resetKey={`${tab}:${pkgId ?? ''}`}>
             {TAB_VIEWS[tab]()}
           </ErrorBoundary>

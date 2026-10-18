@@ -23,6 +23,7 @@ import { commandHelp, executeScript, currentBody } from './commands';
 import { buildExport, glbFile, objFile, printableHtml, toBase64, type Paper } from './exports';
 import { renderCuttingLayoutSVG, renderPatternSheetSVG, renderPieceSVG, renderTiledPrintPages } from '../core/svg';
 import { renderInstructionsMarkdown } from '../core/instructions';
+import { fillMissingPicks, type AutoPicks } from './picks';
 import { createAppStore, type AppStore } from './store';
 import { designSummary, garmentSummary, materialSummary, stateSnapshot, styleSummary } from './summary';
 import { TAB_IDS, type CommandResult } from './types';
@@ -92,6 +93,8 @@ export type StatePatch = z.infer<typeof statePatchSchema>;
 
 const designOptions = z.strictObject({ strict: z.boolean().optional() });
 
+export type DesignData = ReturnType<typeof designSummary> & { picks?: AutoPicks };
+
 /** In strict mode: every requested option value must be one the garment offers. */
 function strictOptionIssues(request: unknown): SchemaIssue[] {
   if (typeof request !== 'object' || request === null) return [];
@@ -141,8 +144,12 @@ export interface AgentAPI {
    * Run a DesignRequest. Option values the garment does not offer are replaced
    * by the closest offered value and listed in `data.substitutions` and
    * `data.warnings`; pass `{ strict: true }` to get `ok: false` instead.
+   * A missing styleId / materialId is picked automatically (as in the console
+   * and CLI) and reported in `data.picks`. Explicit choices that the picks
+   * would never make (e.g. a day cotton for a ball gown) are kept but warned
+   * about in `data.warnings`.
    */
-  design(request: unknown, opts?: unknown): ApiResult<ReturnType<typeof designSummary>>;
+  design(request: unknown, opts?: unknown): ApiResult<DesignData>;
   getState(): ApiResult<ReturnType<typeof stateSnapshot>>;
   setState(patch: unknown): ApiResult<{ state: ReturnType<typeof stateSnapshot>; notes: string[] }>;
   exportSVG(kind?: SvgKind, opts?: unknown): ApiResult<string | string[]>;
@@ -171,7 +178,7 @@ const METHOD_DOCS: Record<string, string> = {
   recommend: 'Ranked ids + reasons. Query: {garment?, styleId?, occasion?, region?, measurements?, limit?}; defaults to current app state.',
   validate: 'Check measurements (cm): issues, estimated keys, body shape.',
   design:
-    'Run a DesignRequest (see schema()); updates the app and returns a summary. Unsupported option values are replaced and listed in data.substitutions + data.warnings; design(req, {strict:true}) rejects them instead. Full package: exportJSON().',
+    'Run a DesignRequest (see schema()); updates the app and returns a summary. styleId/materialId may be left out: they are picked like the console/CLI do and reported in data.picks. Unsuitable explicit cloth/style choices are kept but explained in data.warnings. Unsupported option values are replaced and listed in data.substitutions + data.warnings; design(req, {strict:true}) rejects them instead. Full package: exportJSON().',
   getState: 'Current measurements, selection, request and design id.',
   setState: 'Patch {measurements?, unit?, garment?, styleId?, materialId?, occasion?, region?, options?, name?, tab?}. Does not redesign.',
   exportSVG: "kind 'pattern' | 'layout' (opts {layer}) | 'print' (opts {paper}) -> string[] | 'piece' (opts {pieceId, realSize}).",
@@ -207,7 +214,7 @@ export function createAgentAPI(store: AppStore = createAppStore()): AgentAPI {
       success({
         methods: METHOD_DOCS,
         commands: commandHelp(),
-        hash: 'Open the app with #cmd=<url-encoded commands separated by ;> to run them on load, e.g. #cmd=measure%20bust%3D92%3Bdesign. Hash scripts start from default state (add &keep=1 to build on the saved state); the hash is cleared after running so a reload does not repeat it.',
+        hash: 'Open the app with #cmd=<url-encoded commands separated by ;> to run them on load, e.g. #cmd=measure%20bust%3D92%3Bdesign. Hash scripts start from default state (add &keep=1 to build on the saved state); the hash is cleared after running so a reload does not repeat it. If a command fails, the state from before the link is restored and a banner shows the failing command (agent-output keeps the failure).',
         dom: 'The last command result is mirrored as JSON in <pre id="agent-output">; <html data-clothescad="ready"> once start-up commands finished.',
       }),
 
@@ -281,13 +288,16 @@ export function createAgentAPI(store: AppStore = createAppStore()): AgentAPI {
       guard(() => {
         const o = designOptions.safeParse(input(opts) ?? {});
         if (!o.success) return failure('Invalid design options.', issuesOf(o.error));
-        const parsed = input(request);
+        const { request: parsed, picks } = fillMissingPicks(input(request));
         if (o.data.strict) {
           const problems = strictOptionIssues(parsed);
           if (problems.length) return failure(`Option values not offered by this garment: ${problems.map((p) => p.message).join(' ')}`, problems);
         }
         const r = store.getState().applyRequest(parsed as never);
-        return r.ok ? success(designSummary(r.pkg)) : failure(r.error, r.issues);
+        if (!r.ok) return failure(r.error, r.issues);
+        const data: DesignData = designSummary(r.pkg);
+        if (picks) data.picks = picks;
+        return success(data);
       }),
 
     getState: () => success(stateSnapshot(store.getState())),

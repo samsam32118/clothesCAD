@@ -1,11 +1,12 @@
-import type { DesignPackage, DesignRequest, QualityCheck } from './types';
+import type { DesignPackage, DesignRequest, FabricLayer, QualityCheck } from './types';
 import { resolveMeasurements, validateMeasurements } from './measurements';
 import { analyzeBody } from './fit/analyze';
 import { planFit } from './fit/plan';
 import { draftGarment } from './drafting';
 import { isOneWayFabric, layoutPieces } from './layout';
 import { buildInstructions, buildBom } from './instructions';
-import { getGarment, getMaterial, getStyle } from './presets';
+import { interfacingWidthCm } from './instructions/shared';
+import { getGarment, getMaterial, getStyle, suggestLining } from './presets';
 import { runQualityChecks } from './quality';
 import { hashString } from './geometry';
 
@@ -47,11 +48,18 @@ export function design(request: DesignRequest): DesignPackage {
     hemAllowanceCm,
   });
 
+  // Each layer is laid out on the width of the cloth actually bought for it,
+  // so the bill of materials can take its length straight from the layout.
+  const layerWidth: Record<FabricLayer, number> = {
+    self: material.widthCm,
+    lining: suggestLining(material).widthCm,
+    interfacing: interfacingWidthCm(material),
+  };
   const layers = [...new Set(drafted.pieces.map((p) => p.layer))];
   const layouts = layers.map((layer) =>
     layoutPieces(
       drafted.pieces.filter((p) => p.layer === layer),
-      layer === 'self' ? material.widthCm : layer === 'lining' ? 140 : 90,
+      layerWidth[layer],
       layer,
       { oneWay: layer === 'self' && isOneWayFabric(material) },
     ),

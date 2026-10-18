@@ -149,8 +149,64 @@ export function floorClearance(category: GarmentCategory): number {
   return category === 'trousers' ? 1.5 : 1;
 }
 
-/** Upper bounds for a woven gown bodice's ease (cm). */
-export const GOWN_BODICE_EASE = { bust: 5, waist: 2 } as const;
+/**
+ * Upper bounds for a woven gown bodice's ease (cm). A boned couture bodice is
+ * fitted at 1.5–3 cm over the bust and 0–1.5 cm at the waist; the waist stay
+ * carries the skirt's weight, the bodice must not slide.
+ */
+export const GOWN_BODICE_EASE = { bust: 3, waist: 1.5 } as const;
+/** Least bust ease of a boned gown bodice (room to breathe), cm. */
+export const GOWN_BODICE_MIN_BUST_EASE = 1.5;
+
+/** Most bust ease on a crossover (wrap) bodice: more gapes open at the bust, whatever the fit. */
+export const WRAP_BUST_EASE_MAX = 8;
+
+/** Most ease in a waistband: more and the band stands away from the body at the back. */
+export const WAISTBAND_EASE_MAX = 2;
+
+/**
+ * Most a dartless side seam can take in from bust (or hip) to waist, all four
+ * side-seam edges together (cm): about 3 cm per edge before the seam swings
+ * off grain and drags.
+ */
+export const SIDE_SEAM_SUPPRESSION_MAX = 12;
+
+/** Height below which a figure is petite: relaxed volume is scaled down so it does not swamp the frame. */
+export const PETITE_HEIGHT_CM = 158;
+/** Relaxed ease multiplier for petite figures. */
+export const PETITE_RELAXED_EASE_SCALE = 0.8;
+
+/** Reference body (cm) the base ease tables are written for; ease scales with the body around it. */
+const EASE_REFERENCE: EaseRow = { bust: 92, waist: 74, hip: 100, upperArm: 28, thigh: 56 };
+
+/**
+ * Body-proportional ease: the tables are for a reference body; a smaller body
+ * gets proportionally less ease, a larger body more, within ±15–20 % so tiny
+ * frames still get room to move and large ones are not overwhelmed.
+ */
+export function easeScale(key: keyof EaseRow, r: ResolvedMeasurements): number {
+  const body: EaseRow = { bust: r.bustCm, waist: r.waistCm, hip: r.hipCm, upperArm: r.upperArmCm, thigh: r.thighCm };
+  return Math.min(1.2, Math.max(0.85, body[key] / EASE_REFERENCE[key]));
+}
+
+/**
+ * Estimated sleeve cap height (cm) of a set-in woven sleeve for this body:
+ * about 3/4 of the armhole depth (shoulder point to underarm).
+ */
+export function estimatedCapHeight(r: ResolvedMeasurements, fit: FitPreference): number {
+  const armholeDepth = 0.1 * r.bustCm + 9.5 + { fitted: 0, regular: 1, relaxed: 2 }[fit];
+  return 0.75 * armholeDepth;
+}
+
+/** Underarm seam length a short sleeve needs to hang over the arm and cover the armpit (cm). */
+export const SHORT_SLEEVE_UNDERSEAM_MIN = 8;
+
+/** Shell tops in very fine wovens are pulled on over the head: no zip, a bias-bound neckline. */
+export const FINE_SHELL_GSM = 90;
+
+export function isFineShell(garment: Pick<GarmentDefinition, 'id'>, material: Pick<MaterialPreset, 'construction' | 'weightGsm'>): boolean {
+  return garment.id === 'shell-top' && material.construction === 'woven' && material.weightGsm < FINE_SHELL_GSM;
+}
 
 /** Heel height the hem is planned for: the request's, else 7 cm for gowns and evening/runway, 2 cm otherwise. */
 export function shoeHeelFor(request: Pick<DesignRequest, 'shoeHeelCm' | 'occasion'>, garment: Pick<GarmentDefinition, 'category'>): number {
@@ -323,13 +379,20 @@ export function planFit(ctx: FitContext): FitPlan {
   // style's relaxed room only goes into the skirt (closer styles still apply).
   const gown = cat === 'gown';
   const bodiceMod = gown ? Math.min(0, mod) : mod;
+  // Ease is proportional to the body (see `easeScale`); a petite figure gets
+  // 20 % less relaxed volume. A waistband is never loosened by a style.
+  const petiteScale = r.heightCm < PETITE_HEIGHT_CM && fit === 'relaxed' && !knit ? PETITE_RELAXED_EASE_SCALE : 1;
+  const sized = (k: keyof EaseRow, add: number) => (base[k] + add) * (knit ? 1 : easeScale(k, r) * petiteScale);
   const ease: EaseRow = {
-    bust: base.bust + bodiceMod,
-    waist: base.waist + bodiceMod * (lowerOnly ? 0.25 : 0.5),
-    hip: base.hip + mod,
-    upperArm: base.upperArm + bodiceMod * 0.5,
-    thigh: base.thigh + mod,
+    bust: sized('bust', bodiceMod),
+    waist: sized('waist', lowerOnly ? 0 : bodiceMod * 0.5),
+    hip: sized('hip', mod),
+    upperArm: sized('upperArm', bodiceMod * 0.5),
+    thigh: sized('thigh', mod),
   };
+  if (petiteScale < 1) {
+    rationale.push(`On a ${fmt(r.heightCm)} cm frame a relaxed cut is scaled back by a fifth, so the volume reads as easy rather than swamping your height.`);
+  }
   if (knit) {
     const k = KNIT_STRETCH_USE[fit] * material.stretchPct / 100;
     const capNeg = (circ: number) => -circ * Math.min(0.1, material.stretchPct / 200);
@@ -347,6 +410,10 @@ export function planFit(ctx: FitContext): FitPlan {
     let raised = false;
     for (const k of Object.keys(min) as Array<keyof EaseRow>) {
       if (base[k] === 0 && k !== 'waist') continue;
+      // A boned gown bodice is held by its structure, not by ease: its own caps apply.
+      if (gown && (k === 'bust' || k === 'waist')) continue;
+      // A waistband's ease is capped below; the band is interfaced and does not need more.
+      if (lowerOnly && k === 'waist') continue;
       if (ease[k] < min[k]) {
         ease[k] = min[k];
         raised = true;
@@ -361,40 +428,48 @@ export function planFit(ctx: FitContext): FitPlan {
     if (!knit && ease.hip < 4) ease.hip = 4;
   }
   if (gown && !knit) {
-    // Couture gown bodice: 2.5–5 cm at the bust and 0–2 cm at the waist, so the
-    // waist seam sits on the body and holds the skirt up (with a waist stay).
-    ease.bust = Math.min(GOWN_BODICE_EASE.bust, Math.max(2.5, ease.bust));
-    ease.waist = Math.min(GOWN_BODICE_EASE.waist, ease.waist);
+    // Couture gown bodice: 1.5–3 cm at the bust and 0.5–1.5 cm at the waist, so
+    // the waist seam sits on the body and holds the skirt up (with a waist stay).
+    ease.bust = Math.min(GOWN_BODICE_EASE.bust, Math.max(GOWN_BODICE_MIN_BUST_EASE, ease.bust));
+    ease.waist = Math.min(GOWN_BODICE_EASE.waist, Math.max(0.5, ease.waist));
     rationale.push(
       `A gown bodice carries the weight of the skirt, so it is fitted close: bust +${fmt(ease.bust)} cm, waist +${fmt(ease.waist)} cm. A petersham waist stay and boning keep it from sliding down.`,
     );
   }
 
+  if (garment.id === 'wrap-dress' && ease.bust > WRAP_BUST_EASE_MAX) {
+    ease.bust = WRAP_BUST_EASE_MAX;
+    rationale.push(`A crossover bodice gapes at the bust if it is loose, so its bust ease is held to ${fmt(WRAP_BUST_EASE_MAX)} cm whatever the fit; the skirt carries the relaxed room.`);
+  }
+  if (lowerOnly && !knit) {
+    ease.waist = Math.min(WAISTBAND_EASE_MAX, Math.max(1, ease.waist));
+  }
+
+  // Tops: the hem height decides whether the garment reaches the hip at all.
+  const topHem = cat === 'top' ? topHemHeight(body.shape, L) : undefined;
+  const coversHip = topHem === undefined || topHem <= L.hip + 1;
+
   // ------------------------------------------------------------- finished
   const bustF = r.bustCm + ease.bust;
   const hipF = r.hipCm + ease.hip;
   let waistF = r.waistCm + ease.waist;
-  if (garment.id === 'shift-dress') {
-    const drop = { fitted: 8, regular: 5, relaxed: 2 }[fit];
-    const straight = 0.5 * (bustF + hipF) - drop;
-    if (straight > waistF) {
-      waistF = straight;
-      rationale.push(`A shift falls straight from the bust, so the waist is not taken in: it has ${fmt(waistF - r.waistCm)} cm of room and skims rather than grips.`);
-    }
-  }
-  if (garment.id === 'shell-top') {
-    // No waist darts in a shell: side seams alone can take ~12 cm out.
-    const minWaist = bustF - 12;
+  if (garment.id === 'shift-dress' || garment.id === 'shell-top') {
+    // One-piece block without waist darts: the side seams alone shape the
+    // waist, taking in at most SIDE_SEAM_SUPPRESSION_MAX from bust or hip.
+    const minWaist = Math.min(bustF, hipF) - SIDE_SEAM_SUPPRESSION_MAX;
     if (waistF < minWaist) {
       waistF = minWaist;
-      rationale.push(`The shell is shaped only at the side seams, so its waist (${fmt(waistF)} cm) skims your waist rather than fitting it closely; tuck it in or wear it loose.`);
+      rationale.push(
+        garment.id === 'shift-dress'
+          ? `A shift is shaped only at the side seams, which take in ${fmt(SIDE_SEAM_SUPPRESSION_MAX)} cm from bust and hip: the waist (${fmt(waistF)} cm) skims rather than grips, the line the shift is loved for.`
+          : `The shell is shaped only at the side seams, so its waist (${fmt(waistF)} cm) skims your waist rather than fitting it closely; tuck it in or wear it loose.`,
+      );
     }
     if (isLightShell(garment, material) && waistF < r.bustCm + SHELL_PASS_EASE) {
-      // A long zip puckers a fine silk; a skimming shell slips over the bust and
-      // needs only a short zip at the back neck to pass the head.
+      // A long zip puckers a fine silk; a skimming shell slips over the bust.
       waistF = r.bustCm + SHELL_PASS_EASE;
       rationale.push(
-        `${material.name} is fine and fluid, so the shell skims straight down (waist ${fmt(waistF)} cm) and slips over your bust: it needs only a short zip at the back neck, because a long zip would pucker such a light fabric.`,
+        `${material.name} is fine and fluid, so the shell skims straight down (waist ${fmt(waistF)} cm) and slips over your bust${isFineShell(garment, material) ? ' and head with no zip at all: a zip would pucker such a light fabric' : ': it needs only a short zip at the back neck, because a long zip would pucker such a light fabric'}.`,
       );
     }
   }
@@ -410,6 +485,10 @@ export function planFit(ctx: FitContext): FitPlan {
   // ------------------------------------------------------------ closures
   let closure: Closure = opts.closure;
   if (hasBodice(garment.id) && (closure === 'elastic')) closure = 'none';
+  if (user.closure === undefined && isFineShell(garment, material) && allowed.closure.includes('none') && closure !== 'none') {
+    closure = 'none';
+    rationale.push(`${material.name} is too fine for a zip (it would pucker and show), so the shell has no fastening: a bias-bound neckline wide enough for your head, and a body that slips over your bust.`);
+  }
   if (closure === 'wrap-tie' && garment.id !== 'wrap-dress') {
     const alt = allowed.closure.find((c) => c === 'invisible-zip' || c === 'lapped-zip' || c === 'buttons') ?? 'invisible-zip';
     rationale.push(`Wrap ties are drafted for the wrap dress; this ${garment.name.toLowerCase()} uses ${closureLabel(alt)} instead.`);
@@ -417,14 +496,14 @@ export function planFit(ctx: FitContext): FitPlan {
   }
   if (closure === 'none') {
     const stretch = knit ? material.stretchPct / 100 : 0;
-    const passNeeded = Math.max(r.bustCm, r.hipCm) + (knit ? 0 : 2);
+    const passNeeded = Math.max(r.bustCm, coversHip ? r.hipCm : 0) + (knit ? 0 : 2);
     const ok = waistF * (1 + 0.8 * stretch) >= passNeeded;
     if (!ok) {
       const alt = allowed.closure.find((c) => c === 'invisible-zip' || c === 'lapped-zip' || c === 'buttons');
       if (alt) {
         closure = alt;
         rationale.push(
-          `Without an opening the ${fmt(waistF)} cm waist could not pass over your ${r.bustCm >= r.hipCm ? 'bust' : 'hips'} (${fmt(passNeeded)} cm needed), so ${closureLabel(alt)} is added at the centre back.`,
+          `Without an opening the ${fmt(waistF)} cm waist could not pass over your ${r.bustCm >= r.hipCm || !coversHip ? 'bust' : 'hips'} (${fmt(passNeeded)} cm needed), so ${closureLabel(alt)} is added at the centre back.`,
         );
       } else {
         waistF = passNeeded / (1 + 0.8 * stretch);
@@ -436,6 +515,10 @@ export function planFit(ctx: FitContext): FitPlan {
       );
     }
   }
+  if (cat === 'trousers' && closure === 'invisible-zip' && opts.pockets) {
+    opts.pockets = false;
+    rationale.push('The invisible zip sits in the left side seam, where an in-seam pocket would go, so the pockets are left out; choose the fly front to keep them.');
+  }
   opts.closure = closure;
 
   ease.waist = waistF - r.waistCm;
@@ -444,8 +527,8 @@ export function planFit(ctx: FitContext): FitPlan {
   const hps = hpsHeight(r);
   const heel = shoeHeelFor(request, garment);
   let hemH: number;
-  if (cat === 'top') {
-    hemH = topHemHeight(body.shape, L);
+  if (topHem !== undefined) {
+    hemH = topHem;
     rationale.push(topHemReason(body.shape, hemH));
   } else {
     hemH = presetHemHeight(opts.length, cat, L, r.heightCm, heel);
@@ -514,8 +597,8 @@ export function planFit(ctx: FitContext): FitPlan {
   // ---------------------------------------------------------------- sleeve
   let sleeveLength: number | undefined;
   if (hasBodice(garment.id) && opts.sleeve !== 'none') {
-    sleeveLength = r1(r.armLengthCm * SLEEVE_FRACTION[opts.sleeve] + (opts.sleeve === 'long' ? 1 : 0));
-    rationale.push(sleeveReason(opts.sleeve, r, body));
+    sleeveLength = r1(plannedSleeveLength(opts.sleeve, r, fit));
+    rationale.push(sleeveReason(opts.sleeve, r, body, fit));
   }
 
   // ----------------------------------------------------------- rationale
@@ -526,7 +609,7 @@ export function planFit(ctx: FitContext): FitPlan {
       `Neckline: ${NECKLINE_REASON[opts.neckline]}${rank <= 2 ? ` — one of the most flattering choices for your ${body.shape.replace('-', ' ')} shape` : ''}.`,
     );
   }
-  rationale.push(easeReason(garment, fit, ease, r, knit));
+  rationale.push(easeReason(garment, fit, ease, r, knit, coversHip));
   if (cat === 'skirt' || cat === 'dress' || cat === 'gown') {
     if (garment.id === 'pencil-skirt' || garment.id === 'sheath-dress') {
       rationale.push(straightReason(garment.id, body.shape, hem ?? 0, hipF));
@@ -557,7 +640,7 @@ export function planFit(ctx: FitContext): FitPlan {
   const finished: FitPlan['finished'] = {
     bust: isLower ? undefined : r1(bustF),
     waist: r1(waistF),
-    hip: r1(hipF),
+    hip: coversHip ? r1(hipF) : undefined,
     hem: hem === undefined ? undefined : r1(hem),
     lengthFromWaist: cat === 'top' ? undefined : r1(lengthFromWaist),
     lengthFromShoulder: isLower ? undefined : r1(hps - hemH),
@@ -660,13 +743,25 @@ function hemReason(length: LengthPreset, cat: GarmentCategory, h: number, L: Bod
   }
 }
 
-function sleeveReason(sleeve: string, r: ResolvedMeasurements, body: BodyAnalysis): string {
-  const len = r1(r.armLengthCm * (SLEEVE_FRACTION[sleeve] ?? 0.3));
+/**
+ * Sleeve length from the shoulder point. A short sleeve is measured as the cap
+ * plus an underarm seam long enough to hang and cover the armpit (to about
+ * mid-bicep), not as a fixed fraction of the arm, which on a short arm would
+ * leave only a cap that flares off the arm.
+ */
+export function plannedSleeveLength(sleeve: string, r: ResolvedMeasurements, fit: FitPreference): number {
+  const frac = r.armLengthCm * (SLEEVE_FRACTION[sleeve] ?? 0.3) + (sleeve === 'long' ? 1 : 0);
+  if (sleeve === 'short') return Math.max(frac, 0.4 * r.armLengthCm, estimatedCapHeight(r, fit) + SHORT_SLEEVE_UNDERSEAM_MIN);
+  return frac;
+}
+
+function sleeveReason(sleeve: string, r: ResolvedMeasurements, body: BodyAnalysis, fit: FitPreference): string {
+  const len = r1(plannedSleeveLength(sleeve, r, fit));
   switch (sleeve) {
     case 'cap':
       return `Cap sleeves (${len} cm) just cover the shoulder point${body.shape === 'pear' ? ', widening the shoulder line to balance your hip' : ''}.`;
     case 'short':
-      return `Short sleeves end at ${len} cm from the shoulder, above the fullest part of the upper arm.`;
+      return `Short sleeves end ${len} cm from the shoulder, about mid-bicep: the underarm seam is long enough for the sleeve to hang down the arm and cover the armpit instead of flaring off it.`;
     case 'elbow':
       return `Elbow sleeves (${len} cm) end at the elbow crease line so you can bend your arm freely.`;
     case 'three-quarter':
@@ -676,13 +771,14 @@ function sleeveReason(sleeve: string, r: ResolvedMeasurements, body: BodyAnalysi
   }
 }
 
-function easeReason(g: GarmentDefinition, fit: FitPreference, e: EaseRow, r: ResolvedMeasurements, knit: boolean): string {
+function easeReason(g: GarmentDefinition, fit: FitPreference, e: EaseRow, r: ResolvedMeasurements, knit: boolean, coversHip: boolean): string {
   const parts: string[] = [];
   if (g.category === 'skirt' || g.category === 'trousers') {
     parts.push(`waist +${fmt(e.waist)} cm (room to breathe and sit)`, `hip +${fmt(e.hip)} cm (room to sit and walk)`);
     if (g.category === 'trousers') parts.push(`thigh +${fmt(e.thigh)} cm`);
   } else {
-    parts.push(`bust ${e.bust >= 0 ? '+' : ''}${fmt(e.bust)} cm`, `waist ${e.waist >= 0 ? '+' : ''}${fmt(e.waist)} cm`, `hip ${e.hip >= 0 ? '+' : ''}${fmt(e.hip)} cm`);
+    parts.push(`bust ${e.bust >= 0 ? '+' : ''}${fmt(e.bust)} cm`, `waist ${e.waist >= 0 ? '+' : ''}${fmt(e.waist)} cm`);
+    if (coversHip) parts.push(`hip ${e.hip >= 0 ? '+' : ''}${fmt(e.hip)} cm`);
   }
   const why =
     fit === 'fitted'

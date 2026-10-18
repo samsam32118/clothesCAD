@@ -18,7 +18,7 @@ import {
 } from './geometry';
 import { placePath } from './layout';
 import { headCircumference, heelInstepCircumference } from './measurements';
-import { strideHemNeeded } from './fit/plan';
+import { SHORT_SLEEVE_UNDERSEAM_MIN, strideHemNeeded } from './fit/plan';
 import { frenchSeamBlocker, ZIP_END_ALLOWANCE_CM, zipForOpening } from './drafting/seams';
 
 const SEAM_TOL = 0.3;
@@ -277,6 +277,41 @@ export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
     if (Math.abs(z - drafted) > 0.6) zipIssues.push(`${opening.toFixed(1)} cm opening needs a ${drafted.toFixed(1)} cm zip, not a standard length (nearest ${z} cm)`);
   }
   out.push(check('zip-length', zipIssues.length === 0, 'warning', 'The zip opening is drafted to a standard zip length.', zipIssues.join('; ')));
+
+  // 17. armhole balance: the back armhole is at least as long as the front
+  // (within 0.5 cm), else the sleeve pulls forward and the front armhole gapes.
+  const armholeOf = (roles: ReadonlySet<string>) =>
+    pieces
+      .filter((p) => p.layer === 'self' && roles.has(p.role))
+      .flatMap((p) => p.edges.filter((e) => e.id.startsWith('armhole')))
+      .reduce((a, e) => a + e.lengthCm, 0);
+  const frontAH = armholeOf(new Set(['front-bodice', 'front-dress']));
+  const backAH = armholeOf(new Set(['back-bodice', 'back-dress']));
+  if (frontAH > 0 && backAH > 0) {
+    out.push(
+      check(
+        'armhole-balance',
+        backAH >= frontAH - 0.5,
+        'warning',
+        `Back armhole ${backAH.toFixed(1)} cm ≥ front ${frontAH.toFixed(1)} cm: the sleeve hangs straight.`,
+        `Front armhole ${frontAH.toFixed(1)} cm is longer than the back ${backAH.toFixed(1)} cm: the sleeve will pull forward and the front armhole gape.`,
+      ),
+    );
+  }
+  // 18. a short sleeve has an underarm seam long enough to hang and cover the armpit
+  const sleeve = pieces.find((p) => p.role === 'sleeve' && p.layer === 'self');
+  if (sleeve && pkg.fit.options.sleeve === 'short') {
+    const under = sleeve.edges.find((e) => e.id === 'underarm-front')?.lengthCm ?? 0;
+    out.push(
+      check(
+        'short-sleeve-underseam',
+        under >= SHORT_SLEEVE_UNDERSEAM_MIN - 0.5,
+        'warning',
+        `Short sleeve underarm seam ${under.toFixed(1)} cm: it hangs down the arm.`,
+        `Short sleeve underarm seam is only ${under.toFixed(1)} cm: it is really a cap sleeve and will flare off the arm.`,
+      ),
+    );
+  }
 
   // 14. pieces have sensible size
   const tiny = pieces.filter((p) => polygonArea(p.seamLine) < 4).map((p) => p.id);

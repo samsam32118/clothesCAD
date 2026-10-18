@@ -108,7 +108,7 @@ export const GARMENTS: GarmentDefinition[] = [
       length: 'floor',
       sleeve: 'none',
       neckline: 'jewel',
-      closure: 'invisible-zip',
+      closure: 'lapped-zip',
       lining: false,
       pockets: true,
       fit: 'relaxed',
@@ -118,7 +118,8 @@ export const GARMENTS: GarmentDefinition[] = [
       length: ['midi', 'ankle', 'floor'],
       sleeve: ['none'],
       neckline: [],
-      closure: ['invisible-zip', 'lapped-zip', 'elastic'],
+      // lapped-zip = fly front at the centre front; invisible-zip = left side seam.
+      closure: ['lapped-zip', 'invisible-zip', 'elastic'],
       lining: false,
       pockets: true,
     },

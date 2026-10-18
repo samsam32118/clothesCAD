@@ -7,7 +7,7 @@ import { renderCuttingLayoutSVG, renderPatternSheetSVG, renderTiledPrintPages } 
 import { renderInstructionsMarkdown } from '../core/instructions';
 import type { DesignPackage, FabricLayer } from '../core/types';
 import type { ExportFile } from './types';
-import { ASSEMBLY_STEPS, renderAssemblyMapSVG } from './assembly';
+import { ASSEMBLY_STEPS, printSheetsNote, renderAssemblyMapSVG } from './assembly';
 
 export type Paper = 'A4' | 'letter';
 
@@ -95,7 +95,7 @@ html, body { margin: 0; padding: 0; background: #e9e6df; font-family: system-ui,
 </style></head>
 <body>
 <div class="note">
-<strong>${escapeHtml(pkg.name)}</strong> - ${pages.length} ${paper} pattern page${pages.length === 1 ? '' : 's'} plus an assembly map (first sheet).
+<strong>${escapeHtml(pkg.name)}</strong> - ${escapeHtml(printSheetsNote(pages.length, paper))}
 <ol>${ASSEMBLY_STEPS.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
 <p><button type="button" onclick="window.print()">Print pages</button></p>
 </div>

@@ -12,6 +12,12 @@
  *   equal length; the back side-waist height is solved so side seams match.
  * - Legs hang from crease lines centred on each panel; knee and hem widths are
  *   split front −1 cm / back +1 cm.
+ * - Waist suppression (hip − waist) is shared so that no side seam swings in
+ *   more than SIDE_SUPPRESSION_MAX (front 3 cm, back 3.5 cm): a deeper side
+ *   curve turns the hip into a jodhpur bulge and makes an in-seam pocket gape.
+ *   The rest goes into two front pleats (or darts) and two back darts.
+ * - A prominent seat gets a steeper, higher centre-back seat seam (about
+ *   10–12°, 3.5 cm in and up) so the back does not pull down when sitting.
  */
 import type { Dart, FitPreference, Path, Point } from '../../types';
 import {
@@ -45,6 +51,24 @@ export interface TrouserInput {
   inseam: number; // crotch level to hem
   fit: FitPreference;
   noDarts?: boolean; // elastic waist
+  /** Front waist intake as pleats (classic wide legs) instead of darts. */
+  frontPleats?: boolean;
+  /** Full / prominent seat: steeper, higher centre-back seat seam. */
+  prominentSeat?: boolean;
+}
+
+/** Most a trouser side seam may be taken in from hip to waist, per panel (cm). */
+export const SIDE_SUPPRESSION_MAX = { front: 3, back: 3.5 } as const;
+/** Most intake per front dart / per front pleat / per back dart (cm). */
+export const INTAKE_MAX = { frontDart: 2.5, frontPleat: 3.5, backDart: 3 } as const;
+/** Smallest intake worth sewing as a dart or pleat (cm). */
+const MIN_INTAKE = 1;
+
+/** A pleat folded at the waist and released below it; `at` is the arc length from the side along the waist. */
+export interface Pleat {
+  id: string;
+  at: number;
+  intakeCm: number;
 }
 
 export interface TrouserHalf {
@@ -54,6 +78,10 @@ export interface TrouserHalf {
   hem: Path;
   side: Path; // front: hem -> waist; back: waist -> hem
   darts: Dart[];
+  /** Front only: waist pleats (the waist edge includes their intake). */
+  pleats: Pleat[];
+  /** Back only: straight seat seam from the hip line up to the CB waist (gets a let-out allowance). */
+  seat?: Path;
 }
 
 export interface TrouserBlock {
@@ -73,6 +101,28 @@ function legPath(top: Point, knee: Point, hem: Point): Path {
   const c2 = sub(knee, scale(dir(knee, hem), 0.3 * Math.hypot(d.x, d.y)));
   const upper = cubicBezier(top, c1, c2, knee);
   return [...upper, hem];
+}
+
+/**
+ * Split a waist intake into n equal folds (1 or 2) of at most `max` each;
+ * returns the intake per fold (0 if under MIN_INTAKE) and the count.
+ */
+function splitIntake(intake: number, max: number): { n: number; each: number } {
+  if (intake < MIN_INTAKE) return { n: 0, each: 0 };
+  const n = intake > max ? 2 : 1;
+  return { n, each: Math.min(max, intake / n) };
+}
+
+/**
+ * Share a panel's waist excess between its side seam (at most `sideMax`,
+ * ideally about half) and up to two folds of at most `foldMax` each. Whatever
+ * the folds cannot take falls back to the side seam.
+ */
+function shareSuppression(excess: number, sideMax: number, foldMax: number): { side: number; folds: { n: number; each: number } } {
+  if (excess <= 0) return { side: excess, folds: { n: 0, each: 0 } };
+  const wanted = excess - Math.min(sideMax, 0.5 * excess);
+  const folds = splitIntake(Math.min(wanted, 2 * foldMax), foldMax);
+  return { side: excess - folds.n * folds.each, folds };
 }
 
 function placeDarts(waist: Path, centres: number[], intake: number, length: number, prefix: string): { waist: Path; darts: Dart[] } {
@@ -115,9 +165,10 @@ export function draftTrousers(inp: TrouserInput): TrouserBlock {
   const finF = inp.waistF / 4 + 0.5;
   const cfWaist = { x: hf - 1, y: 0 };
   const excessF = cfWaist.x - finF;
-  let dartF = inp.noDarts ? 0 : clamp(0.4 * excessF, 0, 2.5);
-  if (dartF < 0.8) dartF = 0;
-  const sideWaistF = { x: excessF - dartF, y: 0 };
+  const shareF = inp.noDarts
+    ? { side: excessF, folds: { n: 0, each: 0 } }
+    : shareSuppression(excessF, SIDE_SUPPRESSION_MAX.front, inp.frontPleats ? INTAKE_MAX.frontPleat : INTAKE_MAX.frontDart);
+  const sideWaistF = { x: shareF.side, y: 0 };
   const hipSideF = { x: 0, y: D };
   const crotchF = { x: hf + extF, y: rise };
   const creaseF = (hf + extF) / 2;
@@ -135,21 +186,35 @@ export function draftTrousers(inp: TrouserInput): TrouserBlock {
   const hipCurveF = cubicBezier(hipSideF, { x: 0, y: D * 0.55 }, { x: sideWaistF.x * 0.6, y: D * 0.2 }, sideWaistF);
   const frontSide = dedupe([...sideLowerF, ...hipCurveF.slice(1)]);
   let frontWaist: Path = [sideWaistF, cfWaist];
-  const fd = placeDarts(frontWaist, dartF > 0 ? [Math.max(dartF, creaseF - sideWaistF.x)] : [], dartF, clamp(0.45 * D, 7, 10), 'front');
+  const waistLenF = dist(sideWaistF, cfWaist);
+  const nF = shareF.folds.n;
+  const eachF = shareF.folds.each;
+  // First fold on the crease line; the second towards the side (a pleat 4 cm
+  // away, a dart 3.5 cm), kept clear of the side seam and the fly.
+  const creaseAt = clamp(creaseF - sideWaistF.x, 2.5 + eachF * 1.5, waistLenF - 4 - eachF / 2);
+  const centresF = nF === 2 ? [Math.max(2 + eachF / 2, creaseAt - (inp.frontPleats ? 4 : 3.5)), creaseAt] : nF === 1 ? [creaseAt] : [];
+  let fd: { waist: Path; darts: Dart[] } = { waist: frontWaist, darts: [] };
+  const pleats: Pleat[] = [];
+  if (inp.frontPleats) {
+    centresF.forEach((c, i) => pleats.push({ id: `front-pleat-${i + 1}`, at: c, intakeCm: eachF }));
+  } else {
+    fd = placeDarts(frontWaist, centresF, eachF, clamp(0.45 * D, 7, 10), 'front');
+  }
   frontWaist = fd.waist;
   const frontSideLen = pathLength(frontSide);
   const frontInseamLen = pathLength(frontInseam);
 
   // -------------------------------------------------------------- back
   const finB = inp.waistF / 4 - 0.5;
-  const cbIn = inp.fit === 'relaxed' ? 2 : 2.75;
-  const cbRaise = inp.fit === 'relaxed' ? 2 : 2.75;
+  const seatExtra = inp.prominentSeat ? 1 : 0;
+  const cbIn = (inp.fit === 'relaxed' ? 2.5 : 2.75) + seatExtra;
+  const cbRaise = (inp.fit === 'relaxed' ? 2.5 : 2.75) + seatExtra;
   const cbWaist = { x: cbIn, y: -cbRaise };
   const excessB = hb - cbIn - finB;
-  let dartsB = inp.noDarts ? 0 : clamp(0.55 * excessB, 0, 5);
-  if (dartsB < 0.8) dartsB = 0;
-  const nB = dartsB > 2.6 ? 2 : dartsB > 0 ? 1 : 0;
-  const sideB = excessB - dartsB;
+  const shareB = inp.noDarts ? { side: excessB, folds: { n: 0, each: 0 } } : shareSuppression(excessB, SIDE_SUPPRESSION_MAX.back, INTAKE_MAX.backDart);
+  const nB = shareB.folds.n;
+  const dartsB = nB * shareB.folds.each;
+  const sideB = shareB.side;
   const creaseB = (hb - extB) / 2;
   const kneeInB = { x: creaseB - (kneeLeg / 4 + 0.5), y: yKnee };
   const kneeOutB = { x: creaseB + kneeLeg / 4 + 0.5, y: yKnee };
@@ -163,7 +228,7 @@ export function draftTrousers(inp: TrouserInput): TrouserBlock {
     const c1 = add(start, scale(seatDir, 0.55 * (rise - D)));
     const c2 = { x: cp.x + 0.45 * extB, y: cp.y };
     const curve = cubicBezier(start, c1, c2, cp);
-    return dedupe([...[...curve].reverse(), cbWaist]); // crotch point -> CB waist
+    return dedupe([...curve].reverse()); // crotch point -> hip line at CB
   };
   const inseamFor = (drop: number) => legPath({ x: -extB, y: rise + drop }, kneeInB, hemInB);
   const drop = solveMonotone((d) => -pathLength(inseamFor(d)), -frontInseamLen, -1.5, 4);
@@ -187,8 +252,17 @@ export function draftTrousers(inp: TrouserInput): TrouserBlock {
   backWaist = bd.waist;
   const backHem: Path = [hemOutB, hemInB];
 
-  const front: TrouserHalf = { waist: frontWaist, crotch: frontCrotch, inseam: frontInseam, hem: frontHem, side: frontSide, darts: fd.darts };
-  const back: TrouserHalf = { waist: backWaist, crotch: backCrotch, inseam: backInseam, hem: backHem, side: backSide, darts: bd.darts };
+  const front: TrouserHalf = { waist: frontWaist, crotch: frontCrotch, inseam: frontInseam, hem: frontHem, side: frontSide, darts: fd.darts, pleats };
+  const back: TrouserHalf = {
+    waist: backWaist,
+    crotch: backCrotch,
+    seat: [{ x: 0, y: D }, cbWaist],
+    inseam: backInseam,
+    hem: backHem,
+    side: backSide,
+    darts: bd.darts,
+    pleats: [],
+  };
 
   const widthAt = (p1: Path, p2: Path, y: number) => {
     const x = (p: Path) => {

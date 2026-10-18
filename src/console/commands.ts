@@ -33,7 +33,7 @@ import type {
   Occasion,
 } from '../core/types';
 import { EXPORT_DESCRIPTIONS, EXPORT_KINDS, buildExport, type ExportKind, type Paper } from './exports';
-import { currentBody } from './picks';
+import { currentBody, fillMissingPicks } from './picks';
 import { isDesignStale, type AppStore, type Selection } from './store';
 import {
   designSummary,
@@ -548,13 +548,19 @@ const COMMANDS: CommandSpec[] = [
       } catch (err) {
         return fail(line, `Not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const r = ctx.store.getState().applyRequest(parsed as never);
+      const filled = fillMissingPicks(parsed);
+      const r = ctx.store.getState().applyRequest(filled.request as never);
       if (!r.ok) {
         const issueText = r.issues?.length ? `\n${r.issues.map((i) => `- ${i.path || '(root)'}: ${i.message}`).join('\n')}` : '';
         return fail(line, `Request rejected: ${r.error}${issueText}`, { error: r.error, issues: r.issues ?? [] });
       }
       const warnings = designWarnings(r.pkg).map((w) => `\nWarning: ${w}`).join('');
-      return ok(line, `Designed "${r.pkg.name}" (id ${r.pkg.id}): ${r.pkg.pieces.length} pieces, ${r.pkg.instructions.length} steps.${warnings}`, designSummary(r.pkg));
+      const picked = filled.picks ? filled.picks.reasons.map((x) => `\nPicked: ${x}`).join('') : '';
+      return ok(
+        line,
+        `Designed "${r.pkg.name}" (id ${r.pkg.id}): ${r.pkg.pieces.length} pieces, ${r.pkg.instructions.length} steps.${picked}${warnings}`,
+        { ...designSummary(r.pkg), ...(filled.picks ? { picks: filled.picks } : {}) },
+      );
     },
   },
   {

@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react';
-import { renderCuttingLayoutSVG, renderPatternSheetSVG, renderPieceSVG } from '../../core/svg';
+import { printPageCount, renderCuttingLayoutSVG, renderPatternSheetSVG, renderPieceSVG } from '../../core/svg';
 import type { DesignPackage, FabricLayer } from '../../core/types';
+import { ASSEMBLY_SUMMARY, printSheetsNote } from '../../console/assembly';
 import { buildExport, printableHtml, type Paper } from '../../console/exports';
+import { fabricToBuy } from '../bom';
 import { isDesignStale } from '../../console/store';
 import { formatLength } from '../../console/units';
 import { EmptyState, PageHead, Segmented } from '../components/controls';
@@ -52,15 +54,22 @@ function LayoutView({ pkg }: { pkg: DesignPackage }) {
   const layout = pkg.layouts.find((l) => l.layer === layer) ?? pkg.layouts[0];
   const svg = useMemo(() => (layout ? renderCuttingLayoutSVG(pkg, layout.layer) : ''), [pkg, layout]);
   if (!layout) return <p className="muted">No cutting layout.</p>;
+  const buy = fabricToBuy(pkg, layout.layer);
   return (
     <div className="stack">
       {pkg.layouts.length > 1 ? (
         <Segmented label="Fabric layer" value={layout.layer} options={pkg.layouts.map((l) => ({ value: l.layer, label: LAYER_LABEL[l.layer] }))} onChange={setLayer} />
       ) : null}
       <div className="stat-row">
+        {buy ? (
+          <div className="stat">
+            <b>{buy.buyM.toFixed(2)} m</b>
+            <span>length to buy</span>
+          </div>
+        ) : null}
         <div className="stat">
           <b>{(layout.lengthCm / 100).toFixed(2)} m</b>
-          <span>length to buy</span>
+          <span>layout uses</span>
         </div>
         <div className="stat">
           <b>{layout.fabricWidthCm} cm</b>
@@ -81,6 +90,9 @@ function LayoutView({ pkg }: { pkg: DesignPackage }) {
           ? 'Fold the fabric in half lengthwise, selvedges together, right sides facing. The fold is on the left.'
           : 'Lay the fabric flat in a single layer, right side up.'}{' '}
         Keep every grainline arrow parallel to the selvedge.
+        {buy && buy.layoutM !== null && buy.buyM > buy.layoutM + 0.005
+          ? ' Buy the longer length: the extra covers shrinkage when you pre-wash and straightening the cut end.'
+          : ''}
       </p>
     </div>
   );
@@ -88,6 +100,7 @@ function LayoutView({ pkg }: { pkg: DesignPackage }) {
 
 function Downloads({ pkg }: { pkg: DesignPackage }) {
   const [paper, setPaper] = useState<Paper>('A4');
+  const pageCount = useMemo(() => printPageCount(pkg.pieces, paper), [pkg, paper]);
   const [busy, setBusy] = useState<string | null>(null);
   const notify = useToast();
 
@@ -116,9 +129,11 @@ function Downloads({ pkg }: { pkg: DesignPackage }) {
           onChange={setPaper}
         />
       </div>
+      <p className="hint" style={{ marginBottom: 6 }}>
+        “Print tiled pages” opens <code>print-{paper}.html</code>; press <b>Print pages</b> there. {printSheetsNote(pageCount, paper)}
+      </p>
       <p className="hint" style={{ marginBottom: 12 }}>
-        Print at 100 % (“actual size”) and check the 5 cm test square on page A1. The first sheet is an assembly map: trim the left and top
-        margin of each page along the grey frame, lay it on the dashed line of the page to its left or above, and tape.
+        Print at 100 % (“actual size”) and check the 5 cm test square on page A1. {ASSEMBLY_SUMMARY}
       </p>
       <div className="btn-row">
         <button
