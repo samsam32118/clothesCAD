@@ -235,17 +235,32 @@ export function draftTrousers(inp: TrouserInput): TrouserBlock {
   const backCrotch = buildBackCrotch(drop);
   const backInseam = [...inseamFor(drop)].reverse(); // hem -> crotch
 
-  const sideFor = (ySide: number): Path => {
-    const sw = { x: hb - sideB, y: ySide };
+  const sideFor = (sideIn: number, ySide: number): Path => {
+    const sw = { x: hb - sideIn, y: ySide };
     const hip = { x: hb, y: D };
     const hipCurve = cubicBezier(sw, { x: sw.x + 0.4 * (hip.x - sw.x), y: sw.y + 0.25 * (D - sw.y) }, { x: hb, y: D * 0.55 }, hip);
     const lower = splineThrough([hip, { x: hb - 0.3, y: rise }, kneeOutB, hemOutB], { startTangent: { x: 0, y: 1 } });
     return dedupe([...hipCurve, ...lower.slice(1)]);
   };
-  const ySide = solveMonotone((y) => -pathLength(sideFor(y)), -frontSideLen, -3, 3);
-  const backSide = sideFor(ySide);
-  let backWaist: Path = cubicBezier(cbWaist, add(cbWaist, scale({ x: -seatDir.y, y: seatDir.x }, -(hb - sideB - cbIn) * 0.35)), { x: hb - sideB - 3, y: ySide }, backSide[0]);
-  // ensure the waist leaves the CB at a right angle to the seat seam
+  // The back waist rises towards the raised CB, so its curve is longer than
+  // its horizontal span: take the difference in at the side, so the sewn back
+  // waist (darts closed) is exactly finB. A few fixed-point steps converge.
+  const backFor = (sideIn: number) => {
+    const ySide = solveMonotone((y) => -pathLength(sideFor(sideIn, y)), -frontSideLen, -3, 3);
+    const side = sideFor(sideIn, ySide);
+    const waist = cubicBezier(cbWaist, add(cbWaist, scale({ x: -seatDir.y, y: seatDir.x }, -(hb - sideIn - cbIn) * 0.35)), { x: hb - sideIn - 3, y: ySide }, side[0]);
+    return { side, waist };
+  };
+  let sideIn = sideB;
+  let back0 = backFor(sideIn);
+  for (let i = 0; i < 4; i++) {
+    const err = pathLength(back0.waist) - dartsB - finB;
+    if (Math.abs(err) < 0.02) break;
+    sideIn += err;
+    back0 = backFor(sideIn);
+  }
+  const backSide = back0.side;
+  let backWaist: Path = back0.waist;
   const bw = pathLength(backWaist);
   const centresB = nB === 2 ? [0.36 * bw, 0.68 * bw] : nB === 1 ? [0.5 * bw] : [];
   const bd = placeDarts(backWaist, centresB, nB > 0 ? dartsB / nB : 0, clamp(0.65 * D, 11, 14), 'back');

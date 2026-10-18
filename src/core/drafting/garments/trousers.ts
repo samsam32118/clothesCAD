@@ -146,16 +146,22 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
     notches: [
       { edgeId: 'inseam', at: Math.min(10, pathLength(block.front.inseam) * 0.2), count: 1, label: 'inseam' },
       { edgeId: 'crotch', at: pathLength(flyParts ? flyParts.lower : block.front.crotch) * 0.4, count: 1 },
-      ...(flyParts ? [{ edgeId: 'crotch', at: 0, count: 1 as const, label: 'fly end' }] : []),
+      // Two CF marks (waist and fly end) give the centre-front line under the fly extension.
+      ...(flyParts
+        ? [
+            { edgeId: 'waist', at: 0, fromEnd: true, count: 1 as const, label: 'CF' },
+            { edgeId: 'crotch', at: 0, count: 1 as const, label: 'CF fly end' },
+          ]
+        : []),
       ...pleats.flatMap((p) => [
         { edgeId: 'waist', at: p.at - p.intakeCm / 2, count: 1 as const, label: 'pleat' },
         { edgeId: 'waist', at: p.at + p.intakeCm / 2, count: 1 as const, label: 'pleat' },
       ]),
     ],
     extraLabels: [
-      ...pleats.map((p) => {
+      ...pleats.map((p, i) => {
         const at = pointAtLength(block.front.waist, p.at).point;
-        return { at: { x: at.x, y: at.y + 4 }, text: `pleat ${p.intakeCm.toFixed(1)} cm → fold towards CF`, sizePt: 7 };
+        return { at: { x: at.x, y: at.y + 9 + 2 * i }, text: `pleat ${i + 1}: ${p.intakeCm.toFixed(1)} cm, fold to CF`, sizePt: 7 };
       }),
       ...(flyParts
         ? [{ at: { x: (flyParts.cfLine[0].x + flyParts.cfLine[1].x) / 2 - 1, y: (flyParts.cfLine[0].y + flyParts.cfLine[1].y) / 2 }, text: 'CF · fly fold line', sizePt: 7 }]
@@ -283,19 +289,18 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
   }
   if (fly) {
     B.join('front-crotch', ['front-leg', 'crotch'], ['front-leg', 'crotch'], STAGE.zip - 1, {
-      note: 'Join the two front legs at the centre front from the inseam up to the "fly end" notch. Stitch the curve twice for strength; clip the curve.',
+      note: 'Join the two front legs at the centre front from the inseam up to the "CF fly end" notch. Stitch the curve twice for strength; clip the curve.',
     });
     B.join('fly-zip', ['front-leg', 'fly-facing'], ['front-leg', 'fly-facing'], STAGE.zip, {
       type: 'zip-lapped',
-      note: `Fly front with ${zipPhrase(g, zipLen)}: stitch the zip tape to the right fly extension, fold the left extension under on the CF fold line so it laps over the zip, and topstitch the J-shaped fly line from the waist to the fly end, ${FLY_W - 0.5} cm from the fold.`,
+      note: `Fly front with ${zipPhrase(g, zipLen)}: the right front (as worn) laps over the zip; topstitch its J-shaped fly line ${FLY_W - 0.5} cm from the CF fold line, from the waist to the fly end.`,
     });
-    B.single('fly-curve-finish', ['front-leg', 'fly-curve'], 'plain', STAGE.zip, 'Neaten the curved lower edge of each fly extension with zigzag before the zip goes in.');
-    B.single('fly-top', ['front-leg', 'fly-top'], 'plain', STAGE.waistband, 'Keep the top of the fly extensions folded inside; they are caught in the waistband seam.');
     B.join('fly-shield-attach', ['fly-shield', 'attach'], ['front-leg', 'fly-facing'], STAGE.zip + 1, {
-      note: 'Fold the fly shield in half, neaten its long raw edges together and stitch it behind the zip to the right fly extension.',
+      note: 'Fold the fly shield in half, neaten its long raw edges together and stitch it behind the zip to the left fly extension (as worn), so it lies under the zip on the inside.',
     });
-    B.single('fly-shield-end', ['fly-shield', 'end-start'], 'plain', STAGE.zip + 1, 'Stitch across the lower end of the folded shield 1 cm from the raw edge, trim the corners, turn and press.');
-    B.single('fly-shield-top', ['fly-shield', 'end-end'], 'plain', STAGE.waistband, 'The top of the shield is caught in the waistband seam.');
+    // The shield is made before the zip goes in; its top end is caught in the waistband seam.
+    B.single('fly-shield-end', ['fly-shield', 'end-start'], 'plain', STAGE.zip - 1, 'Fold the fly shield in half lengthwise, right sides together, and stitch across its lower end 1 cm from the raw edge. Trim the corner, turn right side out, push the corner out with a point turner and press. Its top end stays open: it is caught in the waistband seam.');
+    B.single('fly-shield-top', ['fly-shield', 'end-end'], 'plain', STAGE.zip + 1, 'Machine-baste the open top end of the shield closed 1 cm from the raw edge, level with the waist edge of the trousers, so it is caught in the waistband seam.');
   }
   if (sideZip) {
     B.join('side-zip', ['front-leg', 'side-zip'], ['back-leg', 'side-zip'], STAGE.zip, {
@@ -336,9 +341,16 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
     B.join('waistband-loop', ['waistband', 'end-start'], ['waistband', 'end-end'], STAGE.waistband - 1, { note: 'Join the casing into a ring, leaving a 3 cm gap to thread the elastic.' });
     B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Fold the casing over, stitch in the ditch, thread the elastic and close the gap.');
   } else {
-    B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, `Fold the band right sides together and stitch across this end ${g.sa} cm from the raw edge, level with the edge of the opening; trim the corner, then turn and press.`);
-    B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, `Stitch across the underlap end the same way, ${g.sa} cm from the raw edge.`);
-    B.single('waistband-underlap', ['waistband', 'ext-end'], 'plain', STAGE.waistbandFinish, `The ${UNDERLAP} cm extension is the underlap: stitch its lower edge closed as you stitch the end, then sew the hook on the overlapping end and the bar on the underlap.`);
+    const endsNote = `Fold the waistband in half lengthwise, right sides together, and stitch across each short end ${g.sa} cm from the raw edge: the plain end level with the edge of the opening, the underlap end level with the end of the extension. Trim the allowance to 5 mm and cut the corners diagonally, then turn right side out, push the corners out with a point turner and press.`;
+    B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, endsNote);
+    B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, endsNote);
+    B.single(
+      'waistband-underlap',
+      ['waistband', 'ext-end'],
+      'plain',
+      STAGE.waistbandFinish - 1,
+      `The ${UNDERLAP} cm extension is the underlap: it sits behind the plain end when the trousers are closed and carries the bar of the hook and bar. With the band still folded right sides together, stitch along its long lower edge ${g.sa} cm from the raw edges, from the opening to the end of the extension.`,
+    );
     B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, `Press the inner long edge under ${g.sa} cm, pin it just over the seam line and stitch in the ditch from the right side.`);
   }
   addHem(g, 'front-leg', 'hem', false, ha, STAGE.hems, 'Hem both legs at the same time; try on with your shoes first.');

@@ -39,7 +39,15 @@ export const STAGE = {
 export class SeamBook {
   readonly seams: SeamSpec[] = [];
   private ids = new Set<string>();
-  constructor(private material: MaterialPreset) {}
+  /**
+   * `beginnerHems`: the garment is a first project (difficulty ≤ 2), so a
+   * curved hem in a stable woven gets a narrow double-turn hem rather than a
+   * rolled hem, which is hard to keep even round a long flared edge.
+   */
+  constructor(
+    private material: MaterialPreset,
+    private opts: { beginnerHems?: boolean } = {},
+  ) {}
 
   add(spec: SeamSpec): SeamSpec {
     let id = spec.id;
@@ -106,7 +114,7 @@ export class SeamBook {
 
   hemType(curved: boolean): SeamType {
     const m = this.material;
-    if (curved && m.weightGsm < 150) return 'hem-rolled';
+    if (curved && m.weightGsm < 150) return this.opts.beginnerHems && isStableWoven(m) ? 'hem-double-fold' : 'hem-rolled';
     if (m.construction === 'knit') return 'hem-double-fold';
     return m.weightGsm >= 200 || m.stiffness >= 0.5 ? 'hem-blind' : 'hem-double-fold';
   }
@@ -122,6 +130,14 @@ export class SeamBook {
     }
   }
 }
+
+/** A woven that neither slides nor is sheer: it holds a pressed fold. */
+export function isStableWoven(m: MaterialPreset): boolean {
+  return m.construction === 'woven' && m.stiffness > 0.15 && m.weightGsm > 90;
+}
+
+/** Narrow double-turn hem on a curved edge for beginners: 1 cm + 1 cm (cm of allowance). */
+export const BEGINNER_CURVED_HEM_CM = 2;
 
 /** Length of an edge in a list of pieces (helper for intended ease). */
 export function lengthOf(pieces: PatternPiece[], pieceId: string, edgeId: string): number {

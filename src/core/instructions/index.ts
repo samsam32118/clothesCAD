@@ -13,6 +13,7 @@ import {
   listJoin,
   materialTimeFactor,
   materialTraits,
+  needsRotaryCutter,
   minutes,
   openingEdge,
   pieceName,
@@ -27,6 +28,8 @@ import {
   groupSeams,
   machineSetup,
   seamGroupStep,
+  closedByZip,
+  closedSeamLines,
   seamStep,
   type StepDraft,
   type TechniqueEnv,
@@ -123,7 +126,15 @@ const SAFETY: string[] = [
   'Never sew over pins: pull each pin out just before it reaches the presser foot (a needle hitting a pin can snap and fly).',
   'A steam iron runs at 150-230 °C and the steam burns: keep your hand away from the steam holes, stand the iron upright between presses and unplug it when you stop.',
   'Close your shears and keep pins in a pin cushion or magnetic dish, away from children and pets.',
+  'Switch the machine off (or unplug it) before you change the needle or the presser foot or reach under the foot to clear a jam.',
 ];
+
+/** Safety rules for this make: the general ones plus the rotary cutter when the tool list has one. */
+function safetyFor(m: MaterialPreset): string[] {
+  return needsRotaryCutter(m)
+    ? [...SAFETY, 'Rotary cutter: close the blade guard every time you put it down, even for a second, and always cut away from your fingers on the mat.']
+    : SAFETY;
+}
 
 function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   const { material: m, garment, style, fit } = ctx;
@@ -207,7 +218,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
         hasLining ? `For the lining you will later switch to: ${machineSetup(env.lining)}` : null,
         'Sew a test seam on two layers of fabric scrap. The stitches should look the same on both sides; if loops show on one side, adjust the tension dial a little and test again.',
       ],
-      { tips: ['Wind two bobbins now so you do not run out halfway through a seam.'], warnings: SAFETY, minutes: 15 },
+      { tips: ['Wind two bobbins now so you do not run out halfway through a seam.'], warnings: safetyFor(m), minutes: 15 },
     ),
   );
 
@@ -426,7 +437,7 @@ function markSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
 // Construct + fit
 // ---------------------------------------------------------------------------
 
-const FIT_EDGE_RE = /side|inseam|outseam|crotch|rise/i;
+const FIT_EDGE_RE = /side|inseam|outseam|crotch|rise|seat/i;
 
 function isFitSeam(s: SeamSpec, idx: PieceIndex): boolean {
   if (!s.b) return false;
@@ -435,6 +446,23 @@ function isFitSeam(s: SeamSpec, idx: PieceIndex): boolean {
   const roles = [idx.get(s.a.pieceId)?.role, idx.get(s.b.pieceId)?.role];
   if (roles.some((r) => !r || /pocket-bag|waistband|wrap-tie|binding|facing/.test(r))) return false;
   return FIT_EDGE_RE.test(`${s.a.edgeId} ${s.b.edgeId}`);
+}
+
+/**
+ * Which way to sew each kind of curve that is actually being staystitched, so
+ * a skirt is never told about necklines: always from the high or wide point
+ * towards the centre or low point, so the grain is not pushed out of shape.
+ */
+function staystitchDirection(edgeIds: string[]): string {
+  const rules: Array<[RegExp, string]> = [
+    [/neck/i, 'necklines from the shoulder to the centre'],
+    [/wrap/i, 'wrap edges from the shoulder down to the waist'],
+    [/armhole/i, 'armholes from the shoulder down to the underarm'],
+    [/waist/i, 'waists from the side to the centre'],
+  ];
+  const parts = rules.filter(([re]) => edgeIds.some((id) => re.test(id))).map(([, text]) => text);
+  if (!parts.length) return 'Sew each curve from its highest point towards the centre.';
+  return `Sew in this direction so the curve is not stretched: ${listJoin(parts)}.`;
 }
 
 function staystitchStep(ctx: InstructionContext, env: TechniqueEnv): StepDraft | null {
@@ -448,7 +476,7 @@ function staystitchStep(ctx: InstructionContext, env: TechniqueEnv): StepDraft |
     `Before anything else, staystitch the curved edges so they cannot stretch while you handle the pieces: ${listJoin(
       targets.map(({ p, edges }) => `the ${listJoin(edges.map((e) => e.id.replace(/[-_]/g, ' ')))} of the ${p.name.toLowerCase()}`),
     )}.`,
-    `Working on one layer, sew ${fmt(Math.max(0.5, sa - 0.3))} cm from the raw edge (just inside the seam line) with normal stitch length. Sew each curve from the high point towards the centre (from shoulder to centre on necklines, from side to centre on waists).`,
+    `Working on one layer, sew ${fmt(Math.max(0.5, sa - 0.3))} cm from the raw edge (just inside the seam line) with normal stitch length. ${staystitchDirection(targets.flatMap(({ edges }) => edges.map((e) => e.id)))}`,
     'Do not press these curves yet; handle them as little as possible.',
   ];
   const t = materialTraits(env.main);
@@ -693,6 +721,20 @@ function constructSteps(ctx: InstructionContext, env: TechniqueEnv): { steps: St
         steps.push(hemCheckStep(ctx, env, sorted.filter((x) => x.type.startsWith('hem'))));
       }
       flushBaste();
+      const zipOf = group.map((s) => closedByZip(s, env));
+      const zipStepAt = zipOf.every(Boolean) ? steps.findIndex((st) => zipOf.some((z) => z && st.seamIds.includes(z.id))) : -1;
+      if (zipStepAt >= 0) {
+        // The zip step already closed this seam below the zip: say so in that
+        // step instead of a separate "check and press" step.
+        const z = steps[zipStepAt]!;
+        steps[zipStepAt] = {
+          ...z,
+          body: `${z.body}\n${closedSeamLines(group, env).join('\n')}`,
+          seamIds: [...z.seamIds, ...group.map((s) => s.id)],
+          pieceIds: [...new Set([...z.pieceIds, ...group.flatMap((s) => [s.a.pieceId, ...(s.b ? [s.b.pieceId] : [])])])],
+        };
+        continue;
+      }
       steps.push(seamGroupStep(group, env));
       if (first.type === 'set-in-sleeve' && stage === lastSleeveStage) {
         steps.push(sleeveCheckStep(ctx, sorted.filter((x) => x.type === 'set-in-sleeve')));
@@ -759,16 +801,29 @@ function finishSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   }
 
   if (zip) {
+    const band = ctx.pieces.find((p) => p.role === 'waistband' && p.layer === 'self');
     steps.push(
-      draft(
-        'finish',
-        'Sew a hook and eye above the zip',
-        [
-          'On the inside, at the very top of the zip, sew a small hook to one side 2 mm in from the edge and the eye (loop) on the other side so the edges meet without a gap when closed.',
-          'Use a doubled thread and 5-6 small stitches through each hole, catching only the facing, lining or seam allowance so nothing shows on the outside.',
-        ],
-        { minutes: 10, tips: ['This stops the top of the zip from slipping open and takes strain off the slider.'] },
-      ),
+      band
+        ? draft(
+            'finish',
+            'Sew the hook and bar to the waistband',
+            [
+              'Close the zip and lap the plain end of the waistband over the underlap, so the waistband lies flat and level.',
+              'Sew the hook on the inside of the overlapping end, 3 mm in from its edge, so it does not show from the outside.',
+              'Mark where the hook meets the underlap and sew the bar there, so the band closes with no gap and no pull.',
+              'Use a doubled thread and 5-6 small stitches through each hole, catching the inner layer of the waistband only.',
+            ],
+            { pieceIds: [band.id], minutes: 15, tips: ['The hook and bar carries the strain at the waist; the zip only closes the opening below it.'] },
+          )
+        : draft(
+            'finish',
+            'Sew a hook and eye above the zip',
+            [
+              'On the inside, at the very top of the zip, sew a small hook to one side 2 mm in from the edge and the eye (loop) on the other side so the edges meet without a gap when closed.',
+              'Use a doubled thread and 5-6 small stitches through each hole, catching only the facing, lining or seam allowance so nothing shows on the outside.',
+            ],
+            { minutes: 10, tips: ['This stops the top of the zip from slipping open and takes strain off the slider.'] },
+          ),
     );
   }
 

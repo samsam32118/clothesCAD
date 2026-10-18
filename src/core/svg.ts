@@ -53,6 +53,9 @@ const STYLE = `
   .grainhead{fill:#1d4ed8}
   .notch{stroke:#111;stroke-width:0.07}
   .dart{fill:none;stroke:#b91c1c;stroke-width:0.05}
+  .pleatfold{fill:none;stroke:#7c3aed;stroke-width:0.06}
+  .pleatplace{fill:none;stroke:#7c3aed;stroke-width:0.05;stroke-dasharray:0.4 0.25}
+  .pleathead{fill:#7c3aed}
   .fold{stroke:#047857;stroke-width:0.07;fill:none}
   .foldtxt{fill:#047857;font-family:Helvetica,Arial,sans-serif}
   .lbl{fill:#111;font-family:Helvetica,Arial,sans-serif;text-anchor:middle}
@@ -99,6 +102,7 @@ export function pieceMarkup(piece: PatternPiece, o: PieceRenderOptions = {}): st
     parts.push(`<path class="dart" d="M${f2(d.legs[0].x)} ${f2(d.legs[0].y)}L${f2(d.apex.x)} ${f2(d.apex.y)}L${f2(d.legs[1].x)} ${f2(d.legs[1].y)}"/>`);
     parts.push(`<circle cx="${f2(d.apex.x)}" cy="${f2(d.apex.y)}" r="0.15" fill="#b91c1c"/>`);
   }
+  parts.push(pleatMarkup(piece));
   // notches: ticks from the cut line towards the seam line
   for (const n of piece.notches) {
     const c = closestOnPath([...piece.cutLine, piece.cutLine[0]], n.at);
@@ -129,6 +133,69 @@ export function pieceMarkup(piece: PatternPiece, o: PieceRenderOptions = {}): st
     }
   }
   return parts.join('');
+}
+
+/**
+ * Pleat markings from the "pleat" notches on each edge, in edge order:
+ * - box pleat (pleat, pleat centre, pleat): both fold lines solid, the
+ *   placement line dashed at the centre, an arrow from each fold to it;
+ * - knife pleat (pleat, pleat): fold line solid at the first notch,
+ *   placement dashed at the second, an arrow from fold to placement.
+ * Lines run into the piece, square to the edge.
+ */
+function pleatMarkup(piece: PatternPiece): string {
+  const out: string[] = [];
+  const byEdge = new Map<string, Array<{ at: Point; centre: boolean; s: number; inward: Point }>>();
+  for (const n of piece.notches) {
+    if (!/^pleat/i.test(n.label ?? '')) continue;
+    const e = piece.edges.find((x) => x.id === n.edgeId);
+    if (!e) continue;
+    const pts = slicePath(piece.seamLine, e.from, e.to);
+    if (pts.length < 2) continue;
+    const c = closestOnPath(pts, n.at);
+    // tangent of the segment the notch sits on, then the normal into the piece
+    let i = 1;
+    for (let acc = 0; i < pts.length - 1; i++) {
+      acc += dist(pts[i - 1], pts[i]);
+      if (acc >= c.s) break;
+    }
+    const t = dir(pts[i - 1], pts[i]);
+    const inward = insideNormal(piece, sub(n.at, t), { x: n.at.x + t.x, y: n.at.y + t.y }, { x: -t.y, y: t.x });
+    const list = byEdge.get(e.id) ?? [];
+    list.push({ at: n.at, centre: /centre|center/i.test(n.label ?? ''), s: c.s, inward });
+    byEdge.set(e.id, list);
+  }
+  const line = (q: { at: Point; inward: Point }, len: number, cls: string) =>
+    `<path class="${cls}" d="M${f2(q.at.x)} ${f2(q.at.y)}L${f2(q.at.x + q.inward.x * len)} ${f2(q.at.y + q.inward.y * len)}"/>`;
+  const arrow = (from: { at: Point; inward: Point }, to: { at: Point; inward: Point }, depth: number) => {
+    const a = { x: from.at.x + from.inward.x * depth, y: from.at.y + from.inward.y * depth };
+    const b = { x: to.at.x + to.inward.x * depth, y: to.at.y + to.inward.y * depth };
+    const d = dist(a, b);
+    if (d < 0.4) return '';
+    const u = normalize(sub(b, a));
+    const tip = { x: b.x - u.x * 0.1, y: b.y - u.y * 0.1 };
+    const back = { x: tip.x - u.x * Math.min(0.6, d / 3), y: tip.y - u.y * Math.min(0.6, d / 3) };
+    const nn = { x: -u.y * 0.25, y: u.x * 0.25 };
+    return (
+      `<path class="pleatfold" d="M${f2(a.x)} ${f2(a.y)}L${f2(back.x)} ${f2(back.y)}"/>` +
+      `<path class="pleathead" d="M${f2(tip.x)} ${f2(tip.y)}L${f2(back.x + nn.x)} ${f2(back.y + nn.y)}L${f2(back.x - nn.x)} ${f2(back.y - nn.y)}Z"/>`
+    );
+  };
+  for (const list of byEdge.values()) {
+    list.sort((a, b) => a.s - b.s);
+    let i = 0;
+    while (i < list.length) {
+      const [a, b, c] = [list[i], list[i + 1], list[i + 2]];
+      if (a && b && c && !a.centre && b.centre && !c.centre) {
+        out.push(line(a, 8, 'pleatfold'), line(c, 8, 'pleatfold'), line(b, 8, 'pleatplace'), arrow(a, b, 3), arrow(c, b, 3));
+        i += 3;
+      } else if (a && b && !a.centre && !b.centre) {
+        out.push(line(a, 6, 'pleatfold'), line(b, 6, 'pleatplace'), arrow(a, b, 2.5));
+        i += 2;
+      } else i += 1;
+    }
+  }
+  return out.join('');
 }
 
 function insideNormal(piece: PatternPiece, a: Point, b: Point, n: Point): Point {
@@ -299,6 +366,8 @@ function legend(x: number, y: number): string {
     `<path class="seam" d="M0 2L3 2"/><text x="3.5" y="2.3" fill="#111">stitching line</text>` +
     `<path class="grain" d="M18 0.5L21 0.5"/><text x="21.5" y="0.8" fill="#111">grainline</text>` +
     `<path class="dart" d="M18 2L21 2"/><text x="21.5" y="2.3" fill="#111">dart</text>` +
+    `<path class="pleatfold" d="M33 0.5L36 0.5"/><text x="36.5" y="0.8" fill="#111">pleat fold line</text>` +
+    `<path class="pleatplace" d="M33 2L36 2"/><text x="36.5" y="2.3" fill="#111">pleat placement (fold to here)</text>` +
     `</g>`
   );
 }

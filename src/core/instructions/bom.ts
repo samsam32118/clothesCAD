@@ -11,6 +11,7 @@ import {
   seamRepeats,
   sewInInterfacing,
   interfacingWidthCm,
+  needsRotaryCutter,
   zipInfo,
   type InstructionContext,
 } from './shared';
@@ -19,6 +20,8 @@ import { GOWN_BONING, GOWN_HORSEHAIR, GOWN_WAIST_STAY, WRAP_STAY_TAPE } from '..
 
 /** Shrinkage + cutting-mistake margin applied to every fabric length. */
 export const FABRIC_MARGIN = 0.1;
+/** Width of the calico bought for a test version (cm). */
+export const MUSLIN_WIDTH_CM = 150;
 /** Extra margin when the cloth needs matching (checks, large prints). */
 export const MATCHING_MARGIN = 0.1;
 
@@ -142,16 +145,36 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
     });
   }
 
+  // ---- test version (muslin) -------------------------------------------------
+  // The instructions recommend a quick muslin of the main pieces: list the
+  // cheap cloth for it, sized from the main layout on 150 cm calico.
+  const muslinM = metresForLayer('self', ctx.layouts, ctx.pieces, MUSLIN_WIDTH_CM, FABRIC_MARGIN);
+  if (muslinM > 0) {
+    items.push({
+      kind: 'fabric',
+      name: t.knit ? 'Cheap jersey for a test version' : 'Calico (muslin) for a test version',
+      quantity: muslinM,
+      unit: 'm',
+      spec: `${MUSLIN_WIDTH_CM} cm wide ${t.knit ? 'cotton jersey with the same stretch as your fabric' : 'unbleached calico or an old sheet'}, for the practice muslin of the main pieces recommended in step 1`,
+      estCostEur: money(muslinM * (t.knit ? 6 : 4)),
+      essential: false,
+    });
+  }
+
   // ---- notions ------------------------------------------------------------
   const zip = zipInfo(ctx, idx);
+  const fly = ctx.pieces.some((p) => p.id === 'fly-shield');
+  const waistband = ctx.pieces.some((p) => p.role === 'waistband' && p.layer === 'self');
   if (zip) {
     items.push({
       kind: 'notion',
-      name: zip.kind === 'invisible' ? 'Invisible zip' : 'Regular dress/skirt zip',
+      name: zip.kind === 'invisible' ? 'Invisible zip' : fly ? 'Trouser (fly) zip' : 'Regular dress/skirt zip',
       quantity: 1,
       unit: 'pcs',
-      spec: `${zip.zipLengthCm} cm ${zip.kind === 'invisible' ? 'invisible' : 'nylon-coil'} zip for a ${fmt(zip.openingCm)} cm opening, colour-matched`,
-      estCostEur: zip.kind === 'invisible' ? 3 : 2.5,
+      spec: fly
+        ? `${zip.zipLengthCm} cm closed-end trouser zip with a locking slider (metal or sturdy nylon coil) for a ${fmt(zip.openingCm)} cm fly, colour-matched`
+        : `${zip.zipLengthCm} cm ${zip.kind === 'invisible' ? 'invisible' : 'nylon-coil'} zip for a ${fmt(zip.openingCm)} cm opening, colour-matched`,
+      estCostEur: zip.kind === 'invisible' ? 3 : fly ? 3.5 : 2.5,
       essential: true,
     });
     if (!hasLayer('interfacing') && (t.knit || t.slippery || m.stiffness < 0.4)) {
@@ -165,15 +188,29 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
         essential: false,
       });
     }
-    items.push({
-      kind: 'notion',
-      name: 'Hook and eye',
-      quantity: 1,
-      unit: 'pack',
-      spec: 'Small (size 1-2), to close the top of the zip neatly',
-      estCostEur: 2,
-      essential: false,
-    });
+    // The finishing step always sews this on: it is not optional. A waistband
+    // takes a flat hook and bar on its underlap (a small hook would pull out).
+    items.push(
+      waistband
+        ? {
+            kind: 'notion',
+            name: 'Waistband hook and bar',
+            quantity: 1,
+            unit: 'pack',
+            spec: 'Large flat sew-on hook-and-bar set for waistbands: closes the waistband over its underlap and takes the strain off the zip',
+            estCostEur: 2.5,
+            essential: true,
+          }
+        : {
+            kind: 'notion',
+            name: 'Hook and eye',
+            quantity: 1,
+            unit: 'pack',
+            spec: 'Small (size 1-2), to close the top of the zip neatly',
+            estCostEur: 2,
+            essential: true,
+          },
+    );
   }
 
   if (closure === 'buttons') {
@@ -369,7 +406,7 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
   if (m.fiber === 'wool' || m.weightGsm >= 250) items.push(tool('Clapper', 'Hardwood block for flat, crisp seams on wool and linen', 15, false));
   if (closure === 'elastic') items.push(tool('Bodkin or large safety pin', 'To thread elastic through the casing', 2));
   if (closure === 'buttons') items.push(tool('Buttonhole foot', 'Usually supplied with the machine', 8, false));
-  if (t.slippery || t.knit || t.thick) items.push(tool('Rotary cutter and mat', 'Cuts slippery, stretchy or thick fabric without lifting it', 35, false));
+  if (needsRotaryCutter(m)) items.push(tool('Rotary cutter and mat', 'Cuts slippery, stretchy or thick fabric without lifting it', 35, false));
   if (hasFacings) {
     const what = [
       ctx.pieces.some((p) => p.role === 'wrap-tie') ? 'ties' : null,

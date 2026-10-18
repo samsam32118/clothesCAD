@@ -174,8 +174,13 @@ export function buildPiece(draft: PieceDraft): PatternPiece {
   if (dist(grainline[0], grainline[1]) < MIN_GRAINLINE_CM) {
     // Narrow strips (bindings cut across the grain or on the bias): the seam
     // line is too thin for a usable grainline, so let it span the cut piece.
-    const wide = makeGrainline(cutLine, labelAt, draft.grain ?? 'vertical', 0.42);
-    if (dist(wide[0], wide[1]) > dist(grainline[0], grainline[1])) grainline = wide;
+    // Try from the label and from the middle of the piece (a label near the
+    // end of a bias strip leaves only a short chord there); keep the longest.
+    const cb = pathBounds(cutLine);
+    for (const near of [labelAt, { x: (cb.minX + cb.maxX) / 2, y: (cb.minY + cb.maxY) / 2 }]) {
+      const wide = makeGrainline(cutLine, near, draft.grain ?? 'vertical', 0.42);
+      if (dist(wide[0], wide[1]) > dist(grainline[0], grainline[1])) grainline = wide;
+    }
   }
   const b = pathBounds(seamLine);
   const w = b.maxX - b.minX;

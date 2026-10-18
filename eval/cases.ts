@@ -150,8 +150,10 @@ const DEEP_EXTRA_PROFILES = new Set(['round-54', 'petite-hourglass']);
 export function buildCases(opts: CaseOptions = {}): EvalCase[] {
   const garments = GARMENTS.filter((g) => !opts.garments?.length || opts.garments.includes(g.id));
   const cases: EvalCase[] = [];
-  garments.forEach((g, gi) => {
-    const combos = combosFor(g, gi);
+  garments.forEach((g) => {
+    // Salt by the garment's place in the full catalogue, so a filtered run
+    // (--garment) evaluates exactly the same combos as the full run.
+    const combos = combosFor(g, GARMENTS.indexOf(g));
     const usable = opts.quick ? combos.slice(0, 2) : combos;
     const profiles = profilesFor(g.id, opts);
     usable.forEach((combo, ci) => {

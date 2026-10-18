@@ -17,7 +17,7 @@ import type { EdgeDraft, PieceDraft } from '../piece';
 import { dist, pathLength, pathBounds, splitAtLength, dedupe } from '../../geometry';
 import { bodyProfile, type BodyProfile } from '../../fit/profile';
 import { hpsHeight } from '../../measurements';
-import { SeamBook, zipForOpening, zipOpening } from '../seams';
+import { BEGINNER_CURVED_HEM_CM, isStableWoven, SeamBook, zipForOpening, zipOpening } from '../seams';
 
 export interface DraftResult {
   pieces: PatternPiece[];
@@ -58,7 +58,7 @@ export function makeG(ctx: DraftContext): G {
     zipType: closure === 'lapped-zip' ? 'zip-lapped' : 'zip-invisible',
     prof: bodyProfile(ctx.measurements, ctx.body.landmarks),
     hps: hpsHeight(ctx.measurements),
-    book: new SeamBook(ctx.material),
+    book: new SeamBook(ctx.material, { beginnerHems: ctx.garment.difficulty <= 2 }),
   };
 }
 
@@ -268,6 +268,9 @@ export function addHem(g: G, pieceId: string, edgeId: string, curved: boolean, a
 
 /** Hem allowance for a curved/flared hem. */
 export function curvedHemAllowance(g: G, flare: number): number {
+  // First projects in stable wovens: a narrow double-turn hem (1 + 1 cm) that
+  // lies flat round the curve and is easy to keep even.
+  if (g.ctx.garment.difficulty <= 2 && isStableWoven(g.material) && g.material.weightGsm < 150 && flare > 0.3) return Math.min(g.ha, BEGINNER_CURVED_HEM_CM);
   if (flare > 0.66) return Math.min(g.ha, 1.2);
   if (flare > 0.3) return Math.min(g.ha, 2.5);
   return g.ha;

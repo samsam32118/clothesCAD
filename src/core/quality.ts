@@ -228,7 +228,7 @@ export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
   out.push(check('hem-placement', hemH + (pkg.fit.shoeHeelCm ?? 0) >= 0 && !calfBand, 'warning', `Hem sits ${hemH} cm from the floor, clear of the widest part of the calf.`, calfBand ? `Hem at ${hemH} cm cuts across the widest part of the calf (${L.calf.toFixed(0)} cm).` : `Hem height ${hemH} cm is invalid.`));
 
   // 12. fabric quantity in the bill of materials covers the layout
-  const fabric = pkg.bom.find((b) => b.kind === 'fabric');
+  const fabric = pkg.bom.find((b) => b.kind === 'fabric' && b.essential);
   const selfLayout = pkg.layouts.find((l) => l.layer === 'self');
   if (fabric && selfLayout) {
     const metres = fabric.unit === 'm' ? fabric.quantity : fabric.unit === 'cm' ? fabric.quantity / 100 : fabric.quantity;

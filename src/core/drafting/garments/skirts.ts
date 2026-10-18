@@ -31,6 +31,8 @@ import {
   type G,
 } from './common';
 
+/** Waistband underlap beyond the zip, carrying the hook and bar (cm). */
+const WAISTBAND_UNDERLAP = 3;
 const WAISTBAND_W = 3.5;
 const POCKET_TOP = 3;
 const POCKET_OPENING = 16;
@@ -210,7 +212,9 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
   const built = fitFolds(g, drafts).map(buildPiece);
   const finishedWaist = (p: PatternPiece) => edgeLen(built, p.id, 'waist') - dartIntakeOn(p, 'waist');
   const segs = waistbandSegments(built, panelsOrder, finishedWaist);
-  const wbExt = g.closure === 'lapped-zip' ? 3 : 0;
+  // A zipped waistband always gets an underlap: the hook and bar sit on it,
+  // so the band closes flat instead of two butt ends gapping at the zip.
+  const wbExt = elastic ? 0 : WAISTBAND_UNDERLAP;
   const waistband = stripPiece({
     id: 'waistband',
     role: 'waistband',
@@ -222,7 +226,7 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
     extensionEnd: wbExt,
     grain: 'lengthwise',
     seamAllowanceCm: g.sa,
-    notes: elastic ? [`Elastic ${Math.round(r.waistCm * 0.92)} cm × 3 cm`] : undefined,
+    notes: elastic ? [`Elastic ${Math.round(r.waistCm * 0.92)} cm × 3 cm`] : [`${WAISTBAND_UNDERLAP} cm underlap at the end for the hook and bar`],
   });
   const extra: PieceDraft[] = [waistband];
   if (!elastic) {
@@ -310,10 +314,24 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
     B.join('waistband-loop', ['waistband', 'end-start'], ['waistband', 'end-end'], STAGE.waistband - 1, { note: 'Join the casing into a ring before attaching; leave a 3 cm gap in the seam to thread the elastic.' });
     B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Fold the casing over, stitch in the ditch from the outside, thread the elastic, overlap its ends 2 cm and zigzag; close the gap.');
   } else {
-    B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, 'Fold the waistband right sides together and stitch across both ends; trim, turn and press.');
-    B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, 'Stitch across the other end the same way.');
-    if (hasEdge(pieces, 'waistband', 'ext-end')) B.single('waistband-underlap', ['waistband', 'ext-end'], 'plain', STAGE.waistbandFinish, 'The 3 cm extension is the underlap behind the zip: stitch its lower edge closed when you stitch the end, then sew the hook or button on it.');
-    B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Turn the inner edge under and stitch in the ditch from the right side, catching it underneath.');
+    const endsNote = `Fold the waistband in half lengthwise, right sides together, and stitch across each short end ${g.sa} cm from the raw edge: the plain end level with the zip edge, the underlap end level with the end of the extension. Trim the allowance to 5 mm and cut the corners diagonally, then turn right side out, push the corners out with a point turner and press.`;
+    B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, endsNote);
+    B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, endsNote);
+    if (hasEdge(pieces, 'waistband', 'ext-end'))
+      B.single(
+        'waistband-underlap',
+        ['waistband', 'ext-end'],
+        'plain',
+        STAGE.waistbandFinish - 1,
+        `The ${WAISTBAND_UNDERLAP} cm extension is the underlap: it sits behind the plain end when the skirt is closed. With the band still folded right sides together, stitch along its long lower edge ${g.sa} cm from the raw edges, from the zip edge to the end of the extension, so it is closed on that side.`,
+      );
+    B.single(
+      'waistband-inner',
+      ['waistband', 'inner'],
+      'topstitch',
+      STAGE.waistbandFinish,
+      `Press the inner long edge of the waistband under by ${g.sa} cm. Pin it on the inside so the fold just covers the waistband seam, then stitch in the ditch from the right side, catching the fold underneath.`,
+    );
   }
   for (const id of allPanels) addHem(g, id, 'hem', kind !== 'pencil-skirt', ha, STAGE.hems, kind === 'circle-skirt' ? 'Hang the skirt for 24 hours before hemming so the bias sections can drop; then level the hem.' : undefined);
 

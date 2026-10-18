@@ -2,6 +2,55 @@ import type { BomItem, DesignPackage, InstructionStep, MeasurementKey } from '..
 import { fmt } from './shared';
 import { MEASUREMENT_FIELDS } from '../schema';
 
+/**
+ * Measurements the drafter for this garment actually uses (the bodice block
+ * for anything with a bodice, the lower block for skirts and trousers, sleeve
+ * measurements only with sleeves, leg measurements only for trousers).
+ */
+export function usedMeasurements(pkg: DesignPackage): Set<MeasurementKey> {
+  const cat = pkg.garment.category;
+  const L = pkg.body.landmarks;
+  const keys: MeasurementKey[] = ['heightCm', 'waistCm', 'hipCm'];
+  const lower = cat === 'skirt' || cat === 'trousers';
+  if (!lower) {
+    keys.push('bustCm', 'neckCm', 'shoulderWidthCm', 'shoulderLengthCm', 'backWaistLengthCm', 'frontWaistLengthCm', 'shoulderToBustPointCm', 'bustPointDistanceCm');
+    const sleeve = pkg.fit.options.sleeve;
+    if (sleeve !== 'none' && pkg.pieces.some((p) => p.role === 'sleeve')) {
+      keys.push('armLengthCm', 'upperArmCm');
+      if (sleeve === 'elbow' || sleeve === 'three-quarter' || sleeve === 'long') keys.push('elbowCm', 'wristCm');
+    }
+  }
+  if (pkg.silhouette.hemHeightCm < L.waist - 5) keys.push('highHipCm', 'waistToHipCm');
+  if (cat !== 'top') keys.push('waistToKneeCm', 'waistToFloorCm');
+  if (cat === 'trousers') keys.push('crotchDepthCm', 'inseamCm', 'thighCm', 'kneeCm', 'calfCm', 'ankleCm');
+  return new Set(keys);
+}
+
+/**
+ * Whether a style's finishing detail is part of this design: details that
+ * name a feature (zip type, pockets, a seam finish, lining, check matching,
+ * buttons, pleats) apply only when the design has it; others always apply.
+ */
+export function detailApplies(detail: string, pkg: DesignPackage): boolean {
+  const d = detail.toLowerCase();
+  const closure = pkg.fit.options.closure;
+  const finishes = `${pkg.material.handling.seamFinish} ${pkg.seams.map((x) => x.finish).join(' ')}`.toLowerCase();
+  const rules: Array<[RegExp, boolean]> = [
+    [/lapped zip/, closure === 'lapped-zip'],
+    [/invisible zip|concealed zip/, closure === 'invisible-zip' || closure === 'buttons'],
+    [/pocket/, pkg.pieces.some((p) => p.role === 'pocket-bag')],
+    [/hong kong|bias-bound seam|bound seam/, /hong kong|bias[- ]bound/.test(finishes)],
+    [/french seam/, pkg.seams.some((x) => x.type === 'french')],
+    [/pattern matching|matching of checks|match(ed|ing)? (the )?(checks|stripes|plaids?)/, /match|repeat/i.test(pkg.material.handling.cuttingTips)],
+    [/\blined\b|lining/, pkg.pieces.some((p) => p.layer === 'lining')],
+    [/button/, closure === 'buttons'],
+    [/pleat/, pkg.pieces.some((p) => p.notches.some((n) => /pleat/i.test(n.label ?? '')))],
+    [/waistband/, pkg.pieces.some((p) => p.role === 'waistband')],
+    [/\bties?\b|\bbelt/, closure === 'wrap-tie'],
+  ];
+  return rules.every(([re, has]) => !re.test(d) || has);
+}
+
 const MEASUREMENT_LABELS: Array<[MeasurementKey, string]> = [
   ['heightCm', 'Height'],
   ['bustCm', 'Bust'],
@@ -134,18 +183,28 @@ export function renderInstructionsMarkdown(pkg: DesignPackage): string {
   L.push('');
 
   // ---- measurements ---------------------------------------------------------
+  // Only the measurements this pattern is drafted from; the rest are folded
+  // into one line so the few that matter are not lost in a list of 24.
   L.push('## Your measurements', '');
   const estimated = new Set<MeasurementKey>(measurements.estimated);
+  const used = usedMeasurements(pkg);
   L.push('| Measurement | cm | Source |', '|---|---|---|');
+  const unused: string[] = [];
   for (const [key, label] of MEASUREMENT_LABELS) {
     const v = measurements[key];
     if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    if (!used.has(key)) {
+      unused.push(`${label.toLowerCase()} ${fmt(v)}`);
+      continue;
+    }
     L.push(`| ${label} | ${fmt(v)} | ${estimated.has(key) ? 'estimated ⚠' : 'measured'} |`);
   }
   L.push('');
-  if (estimated.size) {
+  if (unused.length) L.push(`<sub>Not used by this ${garment.name.toLowerCase()}: ${unused.join(', ')} cm.</sub>`, '');
+  const estimatedUsed = [...estimated].filter((k) => used.has(k));
+  if (estimatedUsed.length) {
     L.push(
-      `> ⚠ ${estimated.size} measurement${estimated.size === 1 ? ' was' : 's were'} estimated from your height, bust, waist and hip. Measuring them yourself gives a better fit.`,
+      `> ⚠ ${estimatedUsed.length} of the measurements this pattern uses ${estimatedUsed.length === 1 ? 'was' : 'were'} estimated from your height, bust, waist and hip. Measuring them yourself gives a better fit.`,
       '',
     );
   }
@@ -160,6 +219,7 @@ export function renderInstructionsMarkdown(pkg: DesignPackage): string {
     const f = MEASUREMENT_FIELDS[key];
     if (!f) continue;
     if (!f.required && !estimated.has(key)) continue;
+    if (!used.has(key)) continue;
     L.push(`- **${cell(label)}**${estimated.has(key) ? ' (estimated for you, worth measuring)' : ''}: ${cell(f.howTo)}`);
   }
   L.push('');
@@ -248,10 +308,20 @@ export function renderInstructionsMarkdown(pkg: DesignPackage): string {
   }
 
   // ---- styling + glossary ---------------------------------------------------
-  if (style.stylingNotes.length || style.details.length) {
+  // Only details this design actually has; the style's other signatures are
+  // offered as ideas, so nobody hunts the pattern for a pocket that is not there.
+  const inDesign = style.details.filter((d) => detailApplies(d, pkg));
+  const ideas = style.details.filter((d) => !detailApplies(d, pkg));
+  if (style.stylingNotes.length || inDesign.length) {
     L.push('## Styling and finishing details', '');
-    for (const d of style.details) L.push(`- ${d}`);
+    for (const d of inDesign) L.push(`- ${d}`);
     for (const n of style.stylingNotes) L.push(`- ${n}`);
+    L.push('');
+  }
+  if (ideas.length) {
+    L.push(`### Ideas for a next version (not in this pattern)`, '');
+    L.push(`Other signatures of the ${style.name} style that this design does not use:`, '');
+    for (const d of ideas) L.push(`- ${d}`);
     L.push('');
   }
 

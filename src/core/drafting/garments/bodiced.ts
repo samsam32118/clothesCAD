@@ -21,6 +21,7 @@ import { buildSilhouette, type Knot } from '../silhouette';
 import { arc, cubicBezier, dedupe, lerp, pathLength, rotatePath, sub, normalize, add, scale } from '../../geometry';
 import { ballGownGatherRatio, ballGownWaistTreatment, isFineShell, KNIT_BLOCK_STRETCH_PCT, SHORT_SLEEVE_UNDERSEAM_MIN, strideHemNeeded } from '../../fit/plan';
 import { headCircumference } from '../../measurements';
+import { suggestLining } from '../../presets';
 import {
   addDartSeams,
   addHem,
@@ -48,6 +49,8 @@ export const GOWN_HORSEHAIR = '5 cm horsehair braid';
 /** Tape that stabilises the bias wrap edge (wovens: stay tape; knits: clear elastic). */
 export const WRAP_STAY_TAPE = '6 mm stay tape (clear elastic on knits)';
 const WRAP_STAY_SHORTEN_CM = 1.5;
+/** The skirt lining hangs this much shorter than the skirt (cm). */
+const SKIRT_LINING_LIFT = 3;
 /** Gown side seams get a wide allowance so they can be let out at the fitting. */
 const GOWN_SIDE_SA = 2.5;
 
@@ -1102,17 +1105,29 @@ export function draftWrapDress(ctx: DraftContext): DraftResult {
 // Ball gown
 // ---------------------------------------------------------------------------
 
-function sectorPanel(top: number, bottom: number, slant: number, half: boolean): { waist: Path; right: Path; hem: Path; left: Path } {
-  // annulus sector with radial sides of length `slant`, inner arc `top`, outer arc `bottom`
+/**
+ * Annulus-sector gore: radial sides of length `slant`, inner arc `top`, outer
+ * arc `bottom`. `sweep` lengthens the hem radially, from `sweep.right` at the
+ * right side to `sweep.left` at the left (smoothly), for a back sweep or train.
+ */
+function sectorPanel(
+  top: number,
+  bottom: number,
+  slant: number,
+  half: boolean,
+  sweep: { left: number; right: number } = { left: 0, right: 0 },
+): { waist: Path; right: Path; hem: Path; left: Path } {
+  const extraAt = (t: number) => sweep.right + (sweep.left - sweep.right) * t * t * (3 - 2 * t);
+  const lengthen = (hem: Path, dirAt: (q: Point) => Point): Path =>
+    hem.map((q, i) => add(q, scale(dirAt(q), extraAt(hem.length > 1 ? i / (hem.length - 1) : 0))));
   if (bottom - top < 0.5) {
     const w0 = half ? top / 2 : top;
     const w1 = half ? bottom / 2 : bottom;
     const x0 = half ? 0 : -w0 / 2;
+    const x1 = half ? 0 : -w1 / 2;
     const waist: Path = [{ x: x0, y: 0 }, { x: x0 + w0, y: 0 }];
-    const right: Path = [{ x: x0 + w0, y: 0 }, { x: (half ? 0 : -w1 / 2) + w1, y: slant }];
-    const hem: Path = [right[1], { x: half ? 0 : -w1 / 2, y: slant }];
-    const left: Path = [hem[1], waist[0]];
-    return { waist, right, hem, left };
+    const hem = lengthen([{ x: x1 + w1, y: slant }, { x: x1, y: slant }], () => ({ x: 0, y: 1 }));
+    return { waist, right: [waist[1], hem[0]], hem, left: [hem[hem.length - 1], waist[0]] };
   }
   const Ri = (slant * top) / (bottom - top);
   const beta = (bottom - top) / slant; // full panel angle
@@ -1120,8 +1135,23 @@ function sectorPanel(top: number, bottom: number, slant: number, half: boolean):
   const a0 = Math.PI / 2 - beta / 2;
   const c = { x: 0, y: -Ri };
   const waist = arc(c, Ri, a1, a0);
-  const hem = arc(c, Ri + slant, a0, a1);
+  const hem = lengthen(arc(c, Ri + slant, a0, a1), (q) => normalize(sub(q, c)));
   return { waist, right: [waist[waist.length - 1], hem[0]], hem, left: [hem[hem.length - 1], waist[0]] };
+}
+
+/**
+ * Ball-gown gore hem widths relative to an even split: volume is pushed to
+ * the back (centre front 0.8×, centre back 1.3×), as in a classic couture bell.
+ */
+const GORE_HEM_WEIGHT = { cf: 0.8, sf: 0.95, sb: 1.1, cb: 1.3 } as const;
+
+/**
+ * Back sweep (cm added to the skirt length at the centre back, tapering to
+ * nothing at the side seams): a gentle sweep at floor length, a train on the runway.
+ */
+export function ballGownSweep(occasion: string | undefined, length: string): number {
+  if (length !== 'floor') return 0;
+  return occasion === 'runway' ? 30 : 10;
 }
 
 export function draftBallGown(ctx: DraftContext): DraftResult {
@@ -1179,9 +1209,13 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   const skirtLen = (L.waist - fit.hemHeightFromFloorCm) * (1 + 0.04 * fit.options.flare);
   const bw = (id: string) => edgeLen(builtBodice, id, 'waist');
   const tops = { cf: bw('front-centre') * gather * 2, sf: bw('front-side') * gather, sb: bw('back-side') * gather, cb: bw('back-centre') * gather };
-  let bottomFull = (fit.finished.hem ?? 400) / 7;
+  const evenHem = (fit.finished.hem ?? 400) / 7;
+  const weightSum = GORE_HEM_WEIGHT.cf + 2 * (GORE_HEM_WEIGHT.sf + GORE_HEM_WEIGHT.sb + GORE_HEM_WEIGHT.cb);
   const maxW = g.material.widthCm - 2 * g.sa - 4;
-  bottomFull = Math.min(bottomFull, maxW);
+  const goreHem = (key: keyof typeof GORE_HEM_WEIGHT) => Math.min(maxW, (evenHem * 7 * GORE_HEM_WEIGHT[key]) / weightSum);
+  // Sweep: 0 at the side seams, 45 % of it at the side-back/centre-back seam, all of it at the CB.
+  const sweep = ballGownSweep(ctx.request.occasion, fit.options.length);
+  const sweepAt = { side: 0, sbcb: 0.45 * sweep, cb: sweep };
   const panelSpecs: Array<{ key: 'cf' | 'sf' | 'sb' | 'cb'; id: string; name: string; left: string; right: string; half: boolean }> = [
     { key: 'cf', id: 'skirt-cf', name: 'Skirt centre front panel', left: 'cf', right: 'seam-sf', half: true },
     { key: 'sf', id: 'skirt-sf', name: 'Skirt side front panel', left: 'seam-cf', right: 'side', half: false },
@@ -1190,10 +1224,13 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   ];
   const pleated = ballGownWaistTreatment(g.material) === 'pleats';
   const pleatPlan = new Map<string, { count: number; intake: number }>();
-  const skirtDrafts: PieceDraft[] = panelSpecs.map((s) => {
-    const top = Math.min(tops[s.key], bottomFull);
-    let geo = sectorPanel(top, Math.max(bottomFull, top), skirtLen, s.half);
-    if (s.key === 'cb') {
+  const panelSweep = (key: 'cf' | 'sf' | 'sb' | 'cb') =>
+    key === 'sb' ? { left: sweepAt.side, right: sweepAt.sbcb } : key === 'cb' ? { left: sweepAt.sbcb, right: sweepAt.cb } : { left: 0, right: 0 };
+  const panelGeo = (key: 'cf' | 'sf' | 'sb' | 'cb', half: boolean, o: { top?: number; bottom?: number; lift?: number; sweep?: boolean } = {}) => {
+    const bottom = o.bottom ?? goreHem(key);
+    const top = Math.min(o.top ?? tops[key], bottom);
+    let geo = sectorPanel(top, Math.max(bottom, top), skirtLen - (o.lift ?? 0), half, o.sweep === false ? { left: 0, right: 0 } : panelSweep(key));
+    if (key === 'cb') {
       // Grain parallel to the centre back: the zip goes into a straight-grain
       // edge, never a bias one. Rotate the gore so its CB edge is vertical.
       const [a, b] = geo.right;
@@ -1201,6 +1238,10 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
       const rot = (q: Path) => rotatePath(q, ang, a);
       geo = { waist: rot(geo.waist), right: rot(geo.right), hem: rot(geo.hem), left: rot(geo.left) };
     }
+    return geo;
+  };
+  const skirtDrafts: PieceDraft[] = panelSpecs.map((s) => {
+    const geo = panelGeo(s.key, s.half);
     const bodiceWaist = s.key === 'cf' ? bw('front-centre') : s.key === 'sf' ? bw('front-side') : s.key === 'sb' ? bw('back-side') : bw('back-centre');
     const extra = pathLength(geo.waist) - bodiceWaist;
     const notches: PieceDraft['notches'] = [];
@@ -1243,7 +1284,35 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
       hemAllowanceCm: ha,
     };
   });
-  const extra: PieceDraft[] = [...skirtDrafts];
+  // Skirt lining: one gore per skirt gore, flat (not pleated) at the waist,
+  // a narrower A-line (it only has to clear the petticoat), no sweep, 3 cm
+  // shorter. It stops the silk catching on the tulle petticoat.
+  const lining = suggestLining(g.material);
+  const liningMaxW = lining.widthCm - 2 * g.sa - 4;
+  const liningDrafts: PieceDraft[] = panelSpecs.map((s) => {
+    const top = tops[s.key] / gather;
+    const geo = panelGeo(s.key, s.half, { top, bottom: Math.min(liningMaxW, Math.max(top + 2, 0.6 * goreHem(s.key))), lift: SKIRT_LINING_LIFT, sweep: false });
+    const edges: EdgeDraft[] = [{ id: 'waist', kind: 'seam', points: geo.waist }];
+    if (s.right === 'cb') {
+      const cbEdges = centreBackEdges([geo.right[1], geo.right[0]], g, { fold: false, zipLen: skirtZip, lining: true });
+      edges.push(...cbEdges.reverse().map((e) => ({ ...e, points: [...e.points].reverse() })));
+    } else edges.push({ id: s.right, kind: 'seam', points: geo.right });
+    edges.push({ id: 'hem', kind: 'hem', points: geo.hem, allowance: 2 });
+    edges.push({ id: s.left, kind: s.left === 'cf' ? 'fold' : 'seam', points: geo.left });
+    return {
+      id: `${s.id}-lining`,
+      role: 'lining',
+      name: `${s.name} lining`,
+      layer: 'lining',
+      cutCount: s.half ? 1 : 2,
+      cutOnFold: s.half,
+      mirrorPair: !s.half,
+      edges,
+      seamAllowanceCm: g.sa,
+      hemAllowanceCm: 2,
+    };
+  });
+  const extra: PieceDraft[] = [...skirtDrafts, ...liningDrafts];
   if (pockets) {
     const pe = skirtDrafts[1].edges.find((e) => e.id === 'side-pocket');
     if (pe) extra.push(pocketBag({ id: 'pocket-bag', name: 'Pocket bag', layer: 'lining', attach: pe.points, interiorRight: false, seamAllowanceCm: g.sa }));
@@ -1304,6 +1373,23 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   B.join('skirt-sb-cb', ['skirt-sb', 'seam-cb'], ['skirt-cb', 'seam-sb'], STAGE.sideSeams);
   B.join('skirt-cb', ['skirt-cb', 'cb'], ['skirt-cb', 'cb'], STAGE.centreSeam, { note: 'From the bottom of the zip to the hem.' });
   B.join('skirt-cb-zip', ['skirt-cb', 'cb-zip'], ['skirt-cb', 'cb-zip'], STAGE.zip + 2, { type: g.zipType, note: 'The lower part of the same zip continues into the skirt.' });
+  // skirt lining
+  B.join('skirt-lining-cf-sf', ['skirt-cf-lining', 'seam-sf'], ['skirt-sf-lining', 'seam-cf'], STAGE.liningSeams);
+  B.join('skirt-lining-side', ['skirt-sf-lining', 'side'], ['skirt-sb-lining', 'side'], STAGE.liningSeams);
+  B.join('skirt-lining-sb-cb', ['skirt-sb-lining', 'seam-cb'], ['skirt-cb-lining', 'seam-sb'], STAGE.liningSeams);
+  if (hasEdge(pieces, 'skirt-cb-lining', 'cb')) B.join('skirt-lining-cb', ['skirt-cb-lining', 'cb'], ['skirt-cb-lining', 'cb'], STAGE.liningSeams, { note: 'From the zip notch down to the hem; leave the top open for the zip.' });
+  B.single('skirt-lining-cb-zip', ['skirt-cb-lining', 'cb-zip'], 'plain', STAGE.liningAttach + 1, 'Turn the lining edges at the zip under and slip-stitch them to the zip tape, clear of the teeth.');
+  for (const sp of panelSpecs) {
+    const ease = edgeLen(pieces, sp.id, 'waist') - edgeLen(pieces, `${sp.id}-lining`, 'waist');
+    B.join(`skirt-lining-waist-${sp.key}`, [`${sp.id}-lining`, 'waist'], [sp.id, 'waist'], STAGE.waistSeam - 1, {
+      ease: Math.max(0, ease),
+      note:
+        sp.key === 'cf'
+          ? 'After pleating or gathering the skirt waist, lay the lining inside it, wrong sides together, and machine-baste the two waists together 1 cm from the edge so they are sewn to the bodice as one layer.'
+          : undefined,
+    });
+    addHem(g, `${sp.id}-lining`, 'hem', true, 2, STAGE.liningHem, sp.key === 'cf' ? `Hem the lining ${SKIRT_LINING_LIFT} cm shorter than the skirt, so it never shows below it.` : undefined);
+  }
   const pairs: Array<[string, string]> = [
     ['front-centre', 'skirt-cf'],
     ['front-side', 'skirt-sf'],
@@ -1359,7 +1445,7 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
     );
 
   // silhouette: fitted bodice, domed skirt
-  const hemC = 2 * (bottomFull / 2) + 6 * bottomFull;
+  const hemC = goreHem('cf') + 2 * (goreHem('sf') + goreHem('sb') + goreHem('cb'));
   const len = L.waist - fit.hemHeightFromFloorCm;
   const domes: Knot[] = [];
   for (let d = 2; d <= len; d += 4) {

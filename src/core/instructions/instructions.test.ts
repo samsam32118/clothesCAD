@@ -180,7 +180,10 @@ describe('instructions', () => {
     for (const h of ['# Test skirt', '## Overview', '## Why this design suits you', '## Your measurements', '## Shopping list', '## Pattern pieces and cutting', '## Step by step', '## Glossary']) {
       expect(md).toContain(h);
     }
-    expect(md).toMatch(/Calf \| 36 \| estimated/);
+    // Only the measurements a skirt is drafted from are tabled; the rest are folded into one line.
+    expect(md).toMatch(/\| Waist to knee \| [\d.]+ \| (estimated|measured)/);
+    expect(md).not.toMatch(/\| Calf \|/);
+    expect(md).toMatch(/Not used by this a-line skirt:[^\n]*calf 36/);
     expect(md).toContain('Checkpoint');
   });
 });

@@ -70,7 +70,7 @@ describe('bill of materials', () => {
   it.each(ALL_GARMENTS)('%s: buys enough fabric for the layout including shrinkage and lists the notions', (g) => {
     const pkg = designFor(g, 'round-54', 'eu');
     const self = pkg.layouts.find((l) => l.layer === 'self')!;
-    const fabric = pkg.bom.filter((b) => b.kind === 'fabric').reduce((s, b) => s + (b.unit === 'cm' ? b.quantity / 100 : b.quantity), 0);
+    const fabric = pkg.bom.filter((b) => b.kind === 'fabric' && b.essential).reduce((s, b) => s + (b.unit === 'cm' ? b.quantity / 100 : b.quantity), 0);
     expect(fabric * 100).toBeGreaterThanOrEqual(self.lengthCm * (1 + pkg.material.shrinkagePct / 100) - 0.5);
     expect(pkg.bom.some((b) => b.kind === 'thread')).toBe(true);
     if (pkg.seams.some((s) => s.type === 'zip-invisible' || s.type === 'zip-lapped')) {

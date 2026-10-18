@@ -200,6 +200,47 @@ function materialBodyScore(m: MaterialPreset, shape: BodyShape, category?: Garme
   }
 }
 
+/**
+ * What a garment asks of its cloth, beyond being listed as suitable:
+ * crossover and skimming shapes need drape, a flared skirt needs weight to
+ * hang, an evening top reads as silk. Returns a score and a plain reason.
+ */
+export function garmentClothFit(m: MaterialPreset, g: GarmentDefinition, occasion?: Occasion): [number, string | null] {
+  let score = 0;
+  const why: string[] = [];
+  const drapes = m.stiffness <= 0.45 || m.construction === 'knit';
+  if (g.id === 'wrap-dress' || g.id === 'shell-top') {
+    if (drapes) {
+      score += 2;
+      why.push(g.id === 'wrap-dress' ? 'it drapes, so the crossover falls softly instead of standing away' : 'it drapes, so the shell skims instead of boxing out');
+    } else score -= 3;
+  }
+  if (g.id === 'a-line-skirt') {
+    if (m.weightGsm >= 150) {
+      score += 2;
+      why.push('it has the weight to hang in a clean A-line instead of clinging');
+    } else score -= 3;
+  }
+  if (g.category === 'top' && (occasion === 'evening' || occasion === 'runway')) {
+    if (m.fiber === 'silk') {
+      score += 2;
+      why.push('silk gives an evening top its glow and fluid fall');
+    } else score -= 1;
+  }
+  return [score, why.length ? why.join('; ') : null];
+}
+
+/**
+ * Affinity of a cloth to a style: the style lists its cloths most typical
+ * first, so the first is worth more than the last (4 … 7 points).
+ */
+export function styleClothAffinity(m: MaterialPreset, style: StylePreset): number {
+  const i = style.recommendedMaterials.indexOf(m.id);
+  if (i < 0) return 0;
+  const n = style.recommendedMaterials.length;
+  return 4 + 3 * (n > 1 ? 1 - i / (n - 1) : 1);
+}
+
 function styleBodyScore(s: StylePreset, shape: BodyShape): [number, string | null] {
   const sil = s.silhouette;
   switch (shape) {
@@ -303,8 +344,13 @@ export function recommend(opts: RecommendOptions = {}): Recommendation {
       } else score -= 2;
     }
     if (chosenStyle?.recommendedMaterials.includes(m.id)) {
-      score += 4;
-      why.push(`a core cloth of the ${chosenStyle.name} look`);
+      score += styleClothAffinity(m, chosenStyle);
+      why.push(`${chosenStyle.recommendedMaterials[0] === m.id ? 'the signature' : 'a core'} cloth of the ${chosenStyle.name} look`);
+    }
+    if (garment) {
+      const [s, reason] = garmentClothFit(m, garment, occasion);
+      score += s;
+      if (reason) why.push(reason);
     }
     if (region) {
       if (m.regions.includes(region)) {

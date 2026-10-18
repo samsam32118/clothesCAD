@@ -292,19 +292,23 @@ function waistY(p: PatternPiece): number | null {
 }
 
 /**
- * Centre-front line of an overlapping (wrap) piece: the x of a notch labelled
- * "CF", and the direction (+1/−1) from it towards the piece's side seam. The
- * part of the piece beyond the CF is the overlap that lies on top of the other
- * front when worn, so it is not part of the garment's girth.
+ * Centre-front line of a piece that extends past its centre front (a wrap
+ * front, a fly extension): through the notch(es) labelled "CF…", with the
+ * direction (+1/−1) from it towards the piece's side seam. The part beyond
+ * the CF overlaps the other side when worn, so it is not part of the girth.
  */
-function wrapCentre(p: PatternPiece): { x: number; towardSide: 1 | -1 } | null {
-  const cf = p.notches.find((n) => /^cf$/i.test(n.label ?? ''));
-  const side = p.edges.find((e) => e.id === 'side');
-  if (!cf || !side) return null;
+function wrapCentre(p: PatternPiece): { xAt: (y: number) => number; towardSide: 1 | -1 } | null {
+  const cfs = p.notches.filter((n) => /^cf\b/i.test(n.label ?? '')).sort((a, b) => a.at.y - b.at.y);
+  const side = p.edges.find((e) => e.id === 'side' || e.id === 'side-zip' || e.id === 'side-upper');
+  if (!cfs.length || !side) return null;
   const pts = edgePoints(p.seamLine, side);
   if (!pts.length) return null;
   const sx = pts.reduce((s, q) => s + q.x, 0) / pts.length;
-  return { x: cf.at.x, towardSide: sx >= cf.at.x ? 1 : -1 };
+  const a = cfs[0].at;
+  const b = cfs[cfs.length - 1].at;
+  // One mark: a vertical CF. Two (e.g. waist and fly end): the line through them.
+  const xAt = (y: number) => (Math.abs(b.y - a.y) < 1e-6 ? a.x : a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x));
+  return { xAt, towardSide: sx >= a.x ? 1 : -1 };
 }
 
 /**
@@ -375,7 +379,8 @@ function patternCircumference(
         break;
       }
       const wrap = wrapCentre(x.p);
-      const width = wrap ? (wrap.towardSide > 0 ? ex.maxX - wrap.x : wrap.x - ex.minX) : ex.maxX - ex.minX;
+      const cx = wrap?.xAt(target(x, dy));
+      const width = wrap && cx !== undefined ? (wrap.towardSide > 0 ? ex.maxX - cx : cx - ex.minX) : ex.maxX - ex.minX;
       total += Math.max(0, width - openDartWidthAt(x.p, target(x, dy))) * multiplicity(x.p);
     }
     if (ok) best = Math.max(best, total);
@@ -1252,7 +1257,9 @@ export function scoreLayout(pkg: DesignPackage): MetricResult {
 
     // BOM covers the layout (plus pre-wash shrinkage on the main fabric)
     const kind = BOM_KIND_FOR_LAYER[l.layer];
-    const items = pkg.bom.filter((b) => b.kind === kind);
+    // Only what must be bought counts against the layout: optional extras
+    // (cloth for a practice muslin) are not the layer's fabric.
+    const items = pkg.bom.filter((b) => b.kind === kind && b.essential);
     const metres = items.reduce((s, b) => s + bomMetres(b.quantity, b.unit), 0);
     const shrink = l.layer === 'self' ? pkg.material.shrinkagePct / 100 : 0;
     const need = (l.lengthCm / 100) * (1 + shrink);

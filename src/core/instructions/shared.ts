@@ -101,6 +101,13 @@ const EDGE_NAMES: Record<string, string> = {
   'seam-cf': 'centre-front panel',
   'seam-sb': 'side-back panel',
   'seam-cb': 'centre-back panel',
+  'ext-end': 'underlap extension',
+  'ext-start': 'extension',
+  'fly-top': 'top of the fly extension',
+  'fly-facing': 'fly extension',
+  'fly-curve': 'curved fly edge',
+  'side-zip': 'zip section of the side seam',
+  seat: 'centre-back seat seam',
 };
 
 /** "side-left" -> "side left", "cb" -> "centre back", "join-front-skirt-1" -> "lower". */
@@ -306,6 +313,12 @@ export function edgeFinish(m: MaterialPreset): string {
 export function sewInInterfacing(m: MaterialPreset): boolean {
   const s = m.handling.interfacing.trim();
   return /^(silk organza|sew-in)/i.test(s) || /sew-in only/i.test(s);
+}
+
+/** Slippery, stretchy or thick cloth is cut with a rotary cutter (listed in the tools, with its safety rule). */
+export function needsRotaryCutter(m: MaterialPreset): boolean {
+  const t = materialTraits(m);
+  return t.slippery || t.knit || t.thick;
 }
 
 /** Usable width (cm) of the interfacing bought for a main fabric: silk organza 114 cm, fusible 90 cm. */

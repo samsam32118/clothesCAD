@@ -473,8 +473,21 @@ function singleOperation(group: SeamSpec[], env: TechniqueEnv, title: string): S
         ? `Use a narrow zigzag or stretch stitch (length ${fmt(e.mat.handling.stitchLengthMm)} mm) and backstitch at both ends.`
         : `Use stitch length ${fmt(e.mat.handling.stitchLengthMm)} mm and backstitch at both ends.`,
     );
-    if (/\bturn\b/i.test(text))
-      lines.push('Before turning, trim the seam allowance to 5 mm and cut corners diagonally 2 mm from the stitches, so the corners turn out sharp. Push them out gently with a point turner.');
+    // Turning a stitched end: the trimming must come before the turning. A
+    // bare "trim, turn and press" is expanded in place; a note that does not
+    // mention trimming gets the trimming line just before its turning line;
+    // a note that already explains it (point turner) is left alone.
+    if (/\bturn\b/i.test(text) && !/point turner/i.test(text)) {
+      const detail = 'trim the seam allowance to 5 mm and cut the corners diagonally 2 mm from the stitches, so the corners turn out sharp';
+      const at = lines.findIndex((l) => typeof l === 'string' && /\bturn\b/i.test(l));
+      const bare = at >= 0 && /^trim,? turn and press\.?$/i.test(String(lines[at]).trim());
+      if (bare) lines[at] = `${capitalize(detail)}. Then turn right side out, push the corners out gently with a point turner and press.`;
+      else if (!/\btrim/i.test(text)) {
+        const trim = `Before turning, ${detail}. Push them out gently with a point turner.`;
+        if (at >= 0) lines.splice(at, 0, trim);
+        else lines.push(trim);
+      }
+    }
     if (!instr.length) lines.push(finishLine(e));
     perInstance = 7;
     perMetre = 8;
@@ -601,7 +614,7 @@ function invisibleZip(seam: SeamSpec, env: TechniqueEnv, title: string, group: S
       ? `Fuse a 2 cm wide strip of lightweight interfacing to the wrong side along each opening edge so the fabric cannot stretch or ripple behind the zip.`
       : null,
     'Open the zip and, from the back, press the coils flat with a cool iron (synthetic setting) so the teeth uncurl; this lets you stitch closer.',
-    `Lay the open zip face down on the right side of the first opening edge, with the coil sitting exactly on the stitching line (${fmt(e.sa)} cm in from the raw edge) and the top stop 3 mm below the top stitching line. Pin or hand baste it.`,
+    `Lay the open zip face down on the right side of the first opening edge, with the coil sitting exactly on the stitching line (${fmt(e.sa)} cm in from the raw edge) and the top stop 3 mm below ${topSeamLine(env, e.sa)}. Pin or hand baste it.`,
     "Fit the invisible zip foot. Sew the tape down with the coil in the foot's groove, from the top until the foot touches the zip slider. Backstitch.",
     'Close the zip and mark the top edge and any seams that cross the opening on the other tape with chalk, so both sides will line up. Open the zip again.',
     'Pin the second tape face down to the right side of the other opening edge, matching your marks, and sew it the same way with the coil in the other groove.',
@@ -622,7 +635,47 @@ function invisibleZip(seam: SeamSpec, env: TechniqueEnv, title: string, group: S
   });
 }
 
+/**
+ * The seam line at the top of a zip opening, in words a beginner cannot
+ * misread as "topstitching": the waist seam line under a waistband, else the
+ * neckline seam line.
+ */
+function topSeamLine(env: TechniqueEnv, sa: number): string {
+  const band = env.ctx.pieces.some((p) => p.role === 'waistband');
+  return band
+    ? `the waist seam line (${fmt(sa)} cm below the raw top edge, where the waistband will be stitched)`
+    : `the neckline seam line (${fmt(sa)} cm below the raw top edge)`;
+}
+
+/** Fly-front zip (trousers): zip under a topstitched fly, shield behind it. */
+function flyZip(seam: SeamSpec, env: TechniqueEnv, title: string): StepDraft {
+  const e = seamEnv(seam, env);
+  const zip = zipInfo(env.ctx, env.idx);
+  const zipLen = zip?.zipLengthCm ?? 18;
+  const opening = zip?.openingCm ?? zipLen;
+  // The fly line runs 5 mm inside the extension's outer edge, so it catches it.
+  const flyWidth = env.idx.edge(seam.a.pieceId, 'fly-top')?.lengthCm ?? 4;
+  const topstitchFromCf = Math.max(2.5, Math.round((flyWidth - 0.5) * 10) / 10);
+  const lines = [
+    `This step sews the fly front: the zip hides under a flap of the right front (as worn), the classic opening for trousers. You need a ${zipLen} cm trouser zip; the opening is about ${fmt(opening)} cm.`,
+    e.t.noFray ? null : `Neaten the long edge and the curve of both fly extensions first (${edgeFinish(e.mat)}).`,
+    'The front crotch seam is already joined up to the "CF fly end" notch. Above it, machine-baste the two fronts together along the marked centre-front (CF) fold lines with a long 5 mm stitch, from the notch up to the waist. Press the two extensions together towards the left front (as worn).',
+    'Turn the trousers inside out. Lay the closed zip face down on the left fly extension only, with its teeth along the basted CF line and its bottom stop 1 cm above the fly end. Using the zipper foot, stitch the tape to the extension 6 mm from the teeth, then a second row along the tape edge.',
+    'Fold the right fly extension back flat against the right front. Lay the free zip tape on it and stitch it to the right extension only, again 6 mm from the teeth; keep the right front itself out of the way.',
+    `Turn the trousers right side out. With chalk, draw the fly line on the right front: ${fmt(topstitchFromCf)} cm from the CF, running down from the waist and curving in to the CF at the fly end (a "J"). Pin through the extension underneath and topstitch along the line from the waist down, through the right front and its extension.`,
+    'Unpick the basting along the CF: the zip opens under the fly. Sew a short bar tack (a dense zigzag 5 mm long) across the bottom of the J, through all layers, to stop strain tearing the seam.',
+  ];
+  return step('construct', title, lines, {
+    seamIds: [seam.id],
+    pieceIds: seamPieceIds(seam),
+    tips: ['Practise the fly once on two scraps with a cheap zip: after one try it is far less mysterious.', pressTip(e.mat)],
+    warnings: ['Never sew over the zip teeth or stop with the needle: feel for them through the fabric and stitch beside them.'],
+    minutes: minutes(60 * e.factor),
+  });
+}
+
 function lappedZip(seam: SeamSpec, env: TechniqueEnv, title: string, group: SeamSpec[] = [seam]): StepDraft {
+  if (env.ctx.pieces.some((p) => p.id === 'fly-shield') && /fly/.test(seam.a.edgeId)) return flyZip(seam, env, title);
   const e = seamEnv(seam, env);
   const zip = zipInfo(env.ctx, env.idx);
   const join =
@@ -634,8 +687,8 @@ function lappedZip(seam: SeamSpec, env: TechniqueEnv, title: string, group: Seam
   const lines = [
     `This step sews a lapped zip into ${join}: a fold of fabric (the lap) hides the zip. You need a ${zipLen} cm regular zip; the opening is about ${fmt(opening)} cm.`,
     e.t.noFray ? null : `Finish the raw edges of both seam allowances first (${edgeFinish(e.mat)}).`,
-    `Sew the seam at ${fmt(e.sa)} cm from the bottom up to the bottom of the opening (${fmt(opening)} cm below the top stitching line) with normal stitches and a strong backstitch. Then baste the opening closed with a long 5 mm stitch on the same line. Press the whole seam open.`,
-    'Lay the garment wrong side up. Open the zip and place it face down on the right-hand seam allowance only (the underlap), with the coil against the basted seam line and the top stop 3 mm below the top stitching line. Using the zipper foot, stitch the tape to that allowance.',
+    `Sew the seam at ${fmt(e.sa)} cm from the bottom up to the bottom of the opening (${fmt(opening)} cm below ${topSeamLine(env, e.sa)}) with normal stitches and a strong backstitch. Then baste the opening closed with a long 5 mm stitch on the same line. Press the whole seam open.`,
+    `Lay the garment wrong side up. Open the zip and place it face down on the right-hand seam allowance only (the underlap), with the coil against the basted seam line and the top stop 3 mm below ${topSeamLine(env, e.sa)}. Using the zipper foot, stitch the tape to that allowance.`,
     'Turn the zip face up. This folds the allowance into a narrow pleat about 3 mm from the basting; edgestitch along that fold through the allowance and the tape only.',
     'Close the zip and spread the garment flat, right side up. Mark a line 1.2 cm from the basted seam on the other side (the lap) with chalk or tape.',
     'Topstitch from the right side along that line from the top down, then pivot and sew across the bottom of the zip to the seam. Feel for the zip stop so you never sew over metal.',
@@ -888,10 +941,15 @@ function topstitch(seam: SeamSpec, env: TechniqueEnv, title: string, group: Seam
   const instr = seamInstruction(seam);
   const ditch = /ditch|groove/i.test(instr.join(' '));
   const verb = ditch ? 'Stitch in the ditch' : 'Topstitch';
+  // The drafted note usually says exactly what to stitch; only add the generic
+  // "where" line when it does not, so the step never says the same thing twice.
+  const described = /stitch in the ditch|topstitch|edgestitch/i.test(instr.join(' '));
   const lines = [
-    group.length > 1
-      ? `${verb} from the right side of the garment along: ${listJoin(group.map((s) => describeJoin(s, env.idx)))}.`
-      : `${verb} along ${describeJoin(seam, env.idx)} from the right side of the garment.`,
+    described
+      ? null
+      : group.length > 1
+        ? `${verb} from the right side of the garment along: ${listJoin(group.map((s) => describeJoin(s, env.idx)))}.`
+        : `${verb} along ${describeJoin(seam, env.idx)} from the right side of the garment.`,
     ...instr,
     `Lengthen the stitch to ${fmt(Math.max(3, e.mat.handling.stitchLengthMm + 0.5))} mm. ${
       /ditch|groove/i.test(instr.join(' '))
@@ -955,11 +1013,17 @@ function seamTitle(seam: SeamSpec, env: TechniqueEnv, type: SeamSpec['type'], gr
   const subject = groupNoun(group.map((s) => s.a.pieceId), env);
   const edge = humanEdge(seam.a.edgeId);
   const multi = group.length > 1;
+  // Named structural operations get a title that says what they are, so a
+  // beginner can find them (and the notion bought for them) in the list.
+  const texts = [seam.finish ?? '', seam.note ?? ''];
+  if (texts.some((t) => /^waist stay:/i.test(t))) return 'Attach the petersham waist stay';
+  if (texts.some((t) => /^boning channel:/i.test(t))) return 'Add the boning channels';
+  if (texts.some((t) => /^fold the \d+ pleats?\b/i.test(t))) return 'Fold and baste the front pleats';
   switch (type) {
     case 'zip-invisible':
       return 'Insert the invisible zip';
     case 'zip-lapped':
-      return 'Insert the lapped zip';
+      return env.ctx.pieces.some((p) => p.id === 'fly-shield') && /fly/.test(seam.a.edgeId) ? 'Sew the fly front zip' : 'Insert the lapped zip';
     case 'set-in-sleeve':
       return 'Set in the sleeves';
     case 'gathered':
@@ -1025,6 +1089,16 @@ export function closedByZip(seam: SeamSpec, env: TechniqueEnv): SeamSpec | undef
   return env.ctx.seams.find(
     (z) => (z.type === 'zip-invisible' || z.type === 'zip-lapped') && z.a.pieceId === seam.a.pieceId && z.stage <= seam.stage,
   );
+}
+
+/** Lines that complete a zip step for the seam the zip step closed below the opening. */
+export function closedSeamLines(group: SeamSpec[], env: TechniqueEnv): string[] {
+  const seam = group[0]!;
+  const e = seamEnv(seam, env);
+  return [
+    `That also finished the ${humanEdge(seam.a.edgeId)} seam of the ${e.aName} below the zip, so there is no separate seam to sew. Check it from the right side: it should continue the zip line straight, with no pucker where the zip stitching ends (if there is, unpick 3 cm and re-sew that bit).`,
+    e.t.noFray ? null : `Finish the two allowances below the zip if you have not yet done so (${edgeFinish(e.mat)}), then press them open over a seam roll.`,
+  ].filter((l): l is string => !!l);
 }
 
 function closedSeamStep(group: SeamSpec[], env: TechniqueEnv): StepDraft {
