@@ -1,0 +1,6 @@
+node_modules
+dist
+*.tsbuildinfo
+eval/reports/*.json
+!eval/reports/.gitkeep
+.DS_Store
