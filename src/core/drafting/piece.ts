@@ -170,7 +170,13 @@ export function buildPiece(draft: PieceDraft): PatternPiece {
   }));
 
   const labelAt = interiorPoint(seamLine, darts.map((d) => d.apex));
-  const grainline = makeGrainline(seamLine, labelAt, draft.grain ?? 'vertical');
+  let grainline = makeGrainline(seamLine, labelAt, draft.grain ?? 'vertical');
+  if (dist(grainline[0], grainline[1]) < MIN_GRAINLINE_CM) {
+    // Narrow strips (bindings cut across the grain or on the bias): the seam
+    // line is too thin for a usable grainline, so let it span the cut piece.
+    const wide = makeGrainline(cutLine, labelAt, draft.grain ?? 'vertical', 0.42);
+    if (dist(wide[0], wide[1]) > dist(grainline[0], grainline[1])) grainline = wide;
+  }
   const b = pathBounds(seamLine);
   const w = b.maxX - b.minX;
   const h = b.maxY - b.minY;
@@ -214,7 +220,14 @@ export function isNarrow(w: number, h: number): boolean {
   return w < 12 && h > 2.2 * w;
 }
 
-function makeGrainline(poly: Path, near: Point, kind: 'vertical' | 'horizontal' | 'bias'): [Point, Point] {
+/** Shortest grainline worth drawing: it must be long enough to measure from. */
+const MIN_GRAINLINE_CM = 3;
+
+/**
+ * Grainline through `near` (or close to it), spanning `keep` × 2 of the chord
+ * of `poly` along the grain direction (capped at 80 cm).
+ */
+function makeGrainline(poly: Path, near: Point, kind: 'vertical' | 'horizontal' | 'bias', keep = 0.35): [Point, Point] {
   const b = pathBounds(poly);
   const d =
     kind === 'vertical' ? { x: 0, y: 1 } : kind === 'horizontal' ? { x: 1, y: 0 } : { x: Math.SQRT1_2, y: Math.SQRT1_2 };
@@ -241,7 +254,7 @@ function makeGrainline(poly: Path, near: Point, kind: 'vertical' | 'horizontal' 
     const t0 = walk(-1);
     const total = t0 + t1;
     if (total < 2) continue;
-    const half = Math.min(total * 0.35, 40);
+    const half = Math.min(total * keep, 40);
     const centre = (t1 - t0) / 2;
     return [
       { x: c.x + d.x * (centre - half), y: c.y + d.y * (centre - half) },

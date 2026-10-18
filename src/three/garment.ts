@@ -20,6 +20,7 @@ import type { BufferGeometry } from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type {
   BodyLandmarks,
+  GarmentDefinition,
   MaterialPreset,
   Neckline,
   ResolvedMeasurements,
@@ -54,6 +55,8 @@ export interface FigureSource {
   silhouette: Silhouette;
   material: Pick<MaterialPreset, 'render' | 'stiffness' | 'weightGsm' | 'sheen'> &
     Partial<Pick<MaterialPreset, 'id' | 'name' | 'fiber' | 'construction' | 'stretchPct'>>;
+  /** Garment type (optional): a ball gown is rendered as worn over a supporting petticoat. */
+  garment?: Partial<Pick<GarmentDefinition, 'id' | 'category'>>;
 }
 
 /** Minimum radial gap between fabric and body that the validator enforces (cm). */
@@ -280,16 +283,53 @@ interface FoldSpec {
   /** Fraction of its cut stand-off that free-hanging fabric keeps (gravity). */
   hang: number;
   phase: number;
+  /** Upper bound of fold depth (cm): soft fabric folds deeper relative to its fold spacing. */
+  maxDepth: number;
+  /** Secondary harmonic used to make fold spacing and depth irregular. */
+  warpCount: number;
 }
 
-function foldSpec(src: FigureSource, hemCirc: number, salt: string): FoldSpec {
+/** Garments worn over a supporting petticoat / crinoline keep their bell shape. */
+const SUPPORTED_GARMENTS = new Set<string>(['ball-gown']);
+
+/**
+ * How much of its designed stand-off a free-hanging skirt keeps: crisp cloth
+ * (taffeta, mikado, heavy linen) holds its cut shape, fluid cloth (viscose,
+ * charmeuse) falls close to the body and turns the spare width into folds.
+ */
+function drapeHang(src: FigureSource): number {
   const stiff = clamp(src.material.stiffness, 0, 1);
   const weight = clamp((src.material.weightGsm - 150) / 250, 0, 1);
-  const wavelength = 10 + 9 * stiff + src.material.weightGsm / 60;
+  const hang = clamp(0.22 + 0.7 * Math.pow(stiff, 0.8) - 0.06 * weight, 0.2, 0.95);
+  return src.garment?.id !== undefined && SUPPORTED_GARMENTS.has(src.garment.id) ? Math.max(hang, 0.88) : hang;
+}
+
+/** Visible fold spacing at the hem (cm): crisp and heavy cloth forms wider, rounder folds. */
+function foldWavelength(src: FigureSource): number {
+  return 14 + 18 * clamp(src.material.stiffness, 0, 1) + clamp(src.material.weightGsm, 40, 600) / 40;
+}
+
+/**
+ * Estimated perimeter of the hem once the fabric hangs (cm), used to choose
+ * the fold count before the full lattice is built.
+ */
+function hungHemPerimeter(src: FigureSource, curves: RingCurves, rings: SilhouetteRing[], hem: number): number {
+  const bodyMax = rings.reduce((m, r) => (Number.isFinite(r.bodyCircumferenceCm) ? Math.max(m, r.bodyCircumferenceCm) : m), 0);
+  const designed = curves.circ.at(hem);
+  if (!(bodyMax > 0) || designed <= bodyMax) return designed;
+  return bodyMax + (designed - bodyMax) * drapeHang(src);
+}
+
+function foldSpec(src: FigureSource, hungPerimeter: number, salt: string): FoldSpec {
+  const stiff = clamp(src.material.stiffness, 0, 1);
+  const wavelength = foldWavelength(src);
+  const count = Math.round(clamp(hungPerimeter / wavelength, 6, 40));
   return {
-    count: Math.round(clamp(hemCirc / wavelength, 5, 48)),
-    hang: clamp(0.42 + 0.55 * stiff - 0.08 * weight, 0.38, 0.97),
+    count,
+    hang: drapeHang(src),
     phase: hash01(`${src.id ?? src.name ?? 'design'}:${salt}`) * TAU,
+    maxDepth: (0.16 + 0.22 * (1 - stiff)) * wavelength,
+    warpCount: Math.max(2, Math.round(count / 3.2)),
   };
 }
 
@@ -315,6 +355,7 @@ function solveFoldDepth(
   cap: Float64Array,
   phis: number[],
   folds: FoldSpec,
+  v: number,
   target: number,
   scratch: Float64Array,
 ): number {
@@ -323,7 +364,7 @@ function solveFoldDepth(
   for (let j = 0; j < n; j++) if (weight[j]! > 1e-3 && cap[j]! > 1e-3) anyFree = true;
   if (!anyFree) return 0;
   const lengthAt = (a: number) => {
-    for (let j = 0; j < n; j++) scratch[j] = hung[j]! + Math.min(a * weight[j]!, cap[j]!) * foldWave(folds, phis[j]!);
+    for (let j = 0; j < n; j++) scratch[j] = hung[j]! + Math.min(a * weight[j]!, cap[j]!) * foldWave(folds, phis[j]!, v);
     return ringPerimeter(scratch, phis);
   };
   if (lengthAt(0) >= target) return 0;
@@ -338,13 +379,21 @@ function solveFoldDepth(
   return (lo + hi) / 2;
 }
 
-function foldWave(spec: FoldSpec, phi: number): number {
+/**
+ * Drape fold profile around the ring, in [-1, 1]-ish. Fold spacing is warped
+ * by a slow harmonic (real folds are not evenly spaced), the depth varies from
+ * fold to fold, and the warp drifts with `v` (0 at the top edge, 1 at the hem)
+ * so folds wander slightly instead of running as perfectly straight pleats.
+ */
+function foldWave(spec: FoldSpec, phi: number, v = 1): number {
   const n = spec.count;
-  const m = Math.max(2, Math.round(n / 3));
-  return (
-    Math.sin(n * phi + spec.phase) * (0.82 + 0.18 * Math.sin(m * phi + 1.7 * spec.phase)) +
-    0.12 * Math.sin(2 * n * phi + 0.5 + spec.phase)
-  );
+  const m = spec.warpCount;
+  const p = spec.phase;
+  // Phase warp amplitude keeps the local frequency positive: n + a·m·cos(..) > 0.45 n.
+  const a = (0.5 * n) / m;
+  const theta = n * phi + a * Math.sin(m * phi + 1.3 * p) + 0.35 * a * v * Math.sin((m + 1) * phi + 2.1 * p);
+  const depth = 0.68 + 0.32 * Math.sin((m - 1 || 1) * phi + 0.7 * p);
+  return Math.sin(theta) * depth + 0.1 * Math.sin(2 * theta + 0.5);
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +404,8 @@ interface VerticalTubeSpec {
   name: string;
   kind: 'torso' | 'leg';
   curves: RingCurves;
+  /** Drape fold parameters (chosen with the column count). */
+  folds: FoldSpec;
   top: Float32Array; // per column, height
   hem: number;
   cols: number;
@@ -401,7 +452,7 @@ function smoothLatticeVertically(radius: Float32Array, nS: number, cols: number,
   }
 }
 
-function buildVerticalTube(src: FigureSource, model: BodyModel, spec: VerticalTubeSpec): GarmentTube {
+function buildVerticalTube(model: BodyModel, spec: VerticalTubeSpec): GarmentTube {
   const { cols, curves } = spec;
   let topMax = -Infinity;
   for (const v of spec.top) topMax = Math.max(topMax, v);
@@ -446,12 +497,13 @@ function buildVerticalTube(src: FigureSource, model: BodyModel, spec: VerticalTu
   }
   const topH = spec.top.reduce((a, b) => Math.max(a, b), -Infinity);
 
-  const hemCirc = curves.circ.at(spec.hem);
-  const folds = foldSpec(src, hemCirc, spec.name);
+  const folds = spec.folds;
+  const vSpan = Math.max(curves.top - spec.hem, 1);
   const columnTop = spec.top;
 
   const rowBase = new Float64Array(cols);
   const rowWeight = new Float64Array(cols);
+  const rowFree = new Float64Array(cols);
   const rowHung = new Float64Array(cols);
   const rowCap = new Float64Array(cols);
   const rowR = new Float64Array(cols);
@@ -482,10 +534,12 @@ function buildVerticalTube(src: FigureSource, model: BodyModel, spec: VerticalTu
       }
       const colTop = columnTop[j]!;
       const v = clamp((colTop - h) / Math.max(colTop - spec.hem, 1), 0, 1);
-      // Zero at the top edge (waist / bodice), strongest at the hem, only where the fabric stands off the body.
       // Below the fullest point, fabric that is not being tapered falls straight.
       if (falling) r = Math.max(r, prevBase[j]!);
-      rowWeight[j] = smoothstep(1.5, 6, r - hb) * Math.pow(smoothstep(0, 1, v), 1.3);
+      // Free = the fabric stands off the body here (gravity acts on it); folds
+      // additionally fade out toward the top edge (none at the waist, deepest at the hem).
+      rowFree[j] = smoothstep(1.5, 6, r - hb);
+      rowWeight[j] = rowFree[j]! * Math.pow(smoothstep(0, 1, v), 1.3);
       rowBase[j] = r;
     }
     prevBase.set(rowBase);
@@ -494,14 +548,15 @@ function buildVerticalTube(src: FigureSource, model: BodyModel, spec: VerticalTu
     const designed = ringPerimeter(rowBase, phis);
     for (let j = 0; j < cols; j++) {
       const hb = hullR[i * cols + j]!;
-      rowHung[j] = hb + (rowBase[j]! - hb) * (1 - (1 - folds.hang) * rowWeight[j]!);
-      rowCap[j] = 0.6 * (rowHung[j]! - hb);
+      rowHung[j] = hb + (rowBase[j]! - hb) * (1 - (1 - folds.hang) * rowFree[j]!);
+      rowCap[j] = Math.min(0.6 * (rowHung[j]! - hb), folds.maxDepth);
     }
     // ...and the spare length goes into drape folds: solve the fold depth so
     // the ring keeps the designed fabric length (circumference).
-    const foldDepth = solveFoldDepth(rowHung, rowWeight, rowCap, phis, folds, designed, rowR);
+    const vRow = clamp((curves.top - h) / vSpan, 0, 1);
+    const foldDepth = solveFoldDepth(rowHung, rowWeight, rowCap, phis, folds, vRow, designed, rowR);
     for (let j = 0; j < cols; j++) {
-      radius[i * cols + j] = rowHung[j]! + Math.min(foldDepth * rowWeight[j]!, rowCap[j]!) * foldWave(folds, phis[j]!);
+      radius[i * cols + j] = rowHung[j]! + Math.min(foldDepth * rowWeight[j]!, rowCap[j]!) * foldWave(folds, phis[j]!, vRow);
     }
   }
 
@@ -767,15 +822,15 @@ function planTubes(src: FigureSource, model: BodyModel): GarmentTube[] {
   const hasLegs = legCurves !== null;
   if (torsoCurves) {
     const hem = Math.max(0.3, torsoCurves.bottom);
-    const hemCirc = torsoCurves.circ.at(hem);
-    const est = foldSpec(src, hemCirc, 'torso');
-    const cols = Math.round(clamp(est.count * 8, 128, 384) / 4) * 4;
+    const folds = foldSpec(src, hungHemPerimeter(src, torsoCurves, torsoRings, hem), 'torso');
+    const cols = Math.round(clamp(folds.count * 12, 128, 384) / 4) * 4;
     const top = torsoTopProfile(sil, torsoCurves, model, cols, hem);
     tubes.push(
-      buildVerticalTube(src, model, {
+      buildVerticalTube(model, {
         name: 'garment-torso',
         kind: 'torso',
         curves: torsoCurves,
+        folds,
         top,
         hem,
         cols,
@@ -794,9 +849,8 @@ function planTubes(src: FigureSource, model: BodyModel): GarmentTube[] {
 
   if (legCurves) {
     const hem = Math.max(0.3, legCurves.bottom);
-    const hemCirc = legCurves.circ.at(hem);
-    const est = foldSpec(src, hemCirc, 'leg');
-    const cols = Math.round(clamp(est.count * 8, 64, 192) / 4) * 4;
+    const hung = hungHemPerimeter(src, legCurves, legRings, hem);
+    const cols = Math.round(clamp(foldSpec(src, hung, 'leg').count * 12, 64, 192) / 4) * 4;
     model.legs.forEach((leg, idx) => {
       const foot = model.feet[idx]!;
       const mirrored = leg.mirrored;
@@ -812,10 +866,11 @@ function planTubes(src: FigureSource, model: BodyModel): GarmentTube[] {
         return [sideSign * sec.ou, sec.ow];
       };
       tubes.push(
-        buildVerticalTube(src, model, {
+        buildVerticalTube(model, {
           name: mirrored ? 'garment-leg-right' : 'garment-leg-left',
           kind: 'leg',
           curves: legCurves,
+          folds: foldSpec(src, hung, mirrored ? 'leg-right' : 'leg-left'),
           top,
           hem,
           cols,

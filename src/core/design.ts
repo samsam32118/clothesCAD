@@ -3,7 +3,7 @@ import { resolveMeasurements, validateMeasurements } from './measurements';
 import { analyzeBody } from './fit/analyze';
 import { planFit } from './fit/plan';
 import { draftGarment } from './drafting';
-import { layoutPieces } from './layout';
+import { isOneWayFabric, layoutPieces } from './layout';
 import { buildInstructions, buildBom } from './instructions';
 import { getGarment, getMaterial, getStyle } from './presets';
 import { runQualityChecks } from './quality';
@@ -53,6 +53,7 @@ export function design(request: DesignRequest): DesignPackage {
       drafted.pieces.filter((p) => p.layer === layer),
       layer === 'self' ? material.widthCm : layer === 'lining' ? 140 : 90,
       layer,
+      { oneWay: layer === 'self' && isOneWayFabric(material) },
     ),
   );
 

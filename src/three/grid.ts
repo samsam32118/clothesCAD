@@ -71,11 +71,13 @@ export function gridGeometry(rows: number, cols: number, positions: Float32Array
     // Seam: share one normal between column 0 and its duplicate.
     const k0 = (i * stride) * 3;
     const k1 = (i * stride + cols) * 3;
-    for (let c = 0; c < 3; c++) {
-      const avg = (nArr[k0 + c]! + nArr[k1 + c]!) / 2;
-      nArr[k0 + c] = avg;
-      nArr[k1 + c] = avg;
-    }
+    const ax = nArr[k0]! + nArr[k1]!;
+    const ay = nArr[k0 + 1]! + nArr[k1 + 1]!;
+    const az = nArr[k0 + 2]! + nArr[k1 + 2]!;
+    const al = Math.hypot(ax, ay, az) || 1;
+    nArr[k0] = nArr[k1] = ax / al;
+    nArr[k0 + 1] = nArr[k1 + 1] = ay / al;
+    nArr[k0 + 2] = nArr[k1 + 2] = az / al;
     // Collapsed rows (dome apexes): one shared normal for the whole row.
     let collapsed = true;
     const px = positions[k0]!;

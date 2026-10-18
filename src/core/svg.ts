@@ -174,19 +174,36 @@ interface Arranged {
  * its interfacing, a waistband and its interfacing) are drawn once with one
  * cutting line per fabric.
  */
-export function uniquePieces(pieces: PatternPiece[]): PatternPiece[] {
-  const groups = new Map<string, PatternPiece[]>();
+/**
+ * Pieces grouped by identical cutting outline (first = the one printed; the
+ * rest reuse its paper piece). With `crossLayerOnly`, a group only collects
+ * pieces of different layers (a facing and its interfacing), never two
+ * fabric pieces that merely happen to share a shape.
+ */
+export function outlineGroups(pieces: PatternPiece[], crossLayerOnly = false): PatternPiece[][] {
+  const groups = new Map<string, PatternPiece[][]>();
+  const out: PatternPiece[][] = [];
   for (const p of pieces) {
     const key = p.cutLine.map((q) => `${Math.round(q.x * 10)},${Math.round(q.y * 10)}`).join(';');
-    const g = groups.get(key);
+    const list = groups.get(key) ?? [];
+    const g = crossLayerOnly ? list.find((x) => !x.some((q) => q.layer === p.layer)) : list[0];
     if (g) g.push(p);
-    else groups.set(key, [p]);
+    else {
+      const fresh = [p];
+      list.push(fresh);
+      out.push(fresh);
+    }
+    groups.set(key, list);
   }
+  return out;
+}
+
+export function uniquePieces(pieces: PatternPiece[]): PatternPiece[] {
   const out: PatternPiece[] = [];
-  for (const g of groups.values()) {
+  for (const g of outlineGroups(pieces)) {
     const first = g[0];
-    if (g.length === 1) {
-      out.push(first);
+    if (g.length === 1 || first.labels.length === 0) {
+      out.push(...g.slice(0, first.labels.length === 0 ? g.length : 1));
       continue;
     }
     const [name, , , ...rest] = first.labels;
@@ -298,7 +315,7 @@ export function renderCuttingLayoutSVG(pkg: DesignPackage, layer: FabricLayer = 
   const usable = layout.fold === 'folded' ? layout.fabricWidthCm / 2 : layout.fabricWidthCm;
   const L = Math.max(layout.lengthCm, 10);
   const padL = 8;
-  const padT = 8;
+  const padT = 9;
   const W = usable + padL + 6;
   const H = L + padT + 6;
   const parts: string[] = [];
@@ -316,7 +333,10 @@ export function renderCuttingLayoutSVG(pkg: DesignPackage, layer: FabricLayer = 
     if (!piece) continue;
     const poly = placePath(piece.cutLine, pl);
     const fill = layer === 'self' ? '#fde68a' : layer === 'lining' ? '#ddd6fe' : '#bbf7d0';
-    parts.push(`<path d="${pathD(poly.map((p) => ({ x: p.x + padL, y: p.y + padT })))}" fill="${fill}" fill-opacity="0.8" stroke="#334155" stroke-width="0.25"/>`);
+    const single = layout.fold === 'folded' && pl.singleLayer === true;
+    parts.push(
+      `<path d="${pathD(poly.map((p) => ({ x: p.x + padL, y: p.y + padT })))}" fill="${fill}" fill-opacity="${single ? 0.45 : 0.8}" stroke="${single ? '#b91c1c' : '#334155'}" stroke-width="${single ? 0.4 : 0.25}"${single ? ' stroke-dasharray="1.2 0.6"' : ''}/>`,
+    );
     const g = placePath(piece.grainline, pl).map((p) => ({ x: p.x + padL, y: p.y + padT }));
     parts.push(`<path d="M${f2(g[0].x)} ${f2(g[0].y)}L${f2(g[1].x)} ${f2(g[1].y)}" stroke="#1d4ed8" stroke-width="0.3"/>`);
     const b = pathBounds(poly);
@@ -324,9 +344,24 @@ export function renderCuttingLayoutSVG(pkg: DesignPackage, layer: FabricLayer = 
     const cy = (b.minY + b.maxY) / 2 + padT;
     const fs = Math.max(1.4, Math.min(3, (b.maxX - b.minX) / 10));
     parts.push(`<text x="${f2(cx)}" y="${f2(cy)}" font-size="${f2(fs)}" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" fill="#0f172a">${esc(piece.name)}${pl.flipped ? ' (flipped)' : ''}</text>`);
+    if (single) {
+      parts.push(
+        `<text x="${f2(cx)}" y="${f2(cy + fs * 1.2)}" font-size="${f2(fs * 0.8)}" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" fill="#b91c1c">ONE LAYER ONLY – cut last</text>`,
+      );
+    }
   }
+  if (layout.fold === 'folded' && layout.placements.some((pl) => pl.singleLayer)) {
+    parts.push(
+      `<text x="${f2(padL + usable / 2)}" y="${f2(padT + L + 4)}" font-size="2" text-anchor="middle" font-family="Helvetica,Arial,sans-serif" fill="#b91c1c">Dashed red pieces: lift the top layer away and cut through ONE layer only.</text>`,
+    );
+  }
+  const line1 = `${layerTitle(layer)}: ${f2(layout.fabricWidthCm)} cm wide, ${layout.fold === 'folded' ? 'folded selvedge to selvedge' : 'single layer'}`;
+  const line2 = `${f2(layout.lengthCm / 100)} m length used by this layout (buy the amount in the shopping list) · ${Math.round(layout.efficiency * 100)} % of the fabric used`;
+  // Helvetica averages ~0.55 em per character: keep both lines inside the drawing width.
+  const titleSize = Math.min(2.6, (W - padL - 1) / (0.55 * Math.max(line1.length, line2.length)));
   parts.push(
-    `<text x="${padL}" y="4" font-size="2.6" font-family="Helvetica,Arial,sans-serif" fill="#0f172a">${esc(layerTitle(layer))}: ${f2(layout.fabricWidthCm)} cm wide${layout.fold === 'folded' ? ', folded selvedge to selvedge' : ', single layer'} — ${f2(layout.lengthCm / 100)} m (${Math.round(layout.efficiency * 100)} % used)</text>`,
+    `<text x="${padL}" y="${f2(padT - 1.2 - titleSize * 1.15)}" font-size="${f2(titleSize)}" font-family="Helvetica,Arial,sans-serif" fill="#0f172a">${esc(line1)}</text>`,
+    `<text x="${padL}" y="${f2(padT - 1.2)}" font-size="${f2(titleSize)}" font-family="Helvetica,Arial,sans-serif" fill="#334155">${esc(line2)}</text>`,
   );
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${f2(W)} ${f2(H)}" role="img" aria-label="Cutting layout"><title>Cutting layout – ${esc(layer)}</title>${parts.join('')}</svg>`;
 }
@@ -350,8 +385,9 @@ const PAPER = {
  * a 10 mm overlap strip marked with dashed lines so pages can be trimmed and
  * taped. Page A1 also carries the title, a legend and a 5 cm test square.
  */
-export function renderTiledPrintPages(pkg: DesignPackage, opts: { paper: 'A4' | 'letter' }): string[] {
-  const paper = PAPER[opts.paper] ?? PAPER.A4;
+/** Tiling plan of the 1:1 print pages: arrangement, page grid and the number of pages actually printed. */
+function planPrintTiling(allPieces: PatternPiece[], paperName: 'A4' | 'letter') {
+  const paper = PAPER[paperName] ?? PAPER.A4;
   const margin = 10; // printer margin, mm
   const overlap = 10; // mm
   const pw = paper.w - 2 * margin; // printable width
@@ -359,7 +395,7 @@ export function renderTiledPrintPages(pkg: DesignPackage, opts: { paper: 'A4' | 
   const stepX = pw - overlap;
   const stepY = ph - overlap;
   const headerH = 80; // mm reserved at the top of the canvas for title + test square
-  const pieces = uniquePieces((['self', 'lining', 'interfacing'] as FabricLayer[]).flatMap((l) => pkg.pieces.filter((p) => p.layer === l)));
+  const pieces = uniquePieces((['self', 'lining', 'interfacing'] as FabricLayer[]).flatMap((l) => allPieces.filter((p) => p.layer === l)));
   const maxPieceW = Math.max(...pieces.map((p) => (p.bounds.maxX - p.bounds.minX) * 10), 0);
   // Try several page-column counts and keep the arrangement that prints the fewest pages.
   let best: { arr: ReturnType<typeof arrangePieces>; pages: number; cols: number; rows: number } | null = null;
@@ -387,7 +423,18 @@ export function renderTiledPrintPages(pkg: DesignPackage, opts: { paper: 'A4' | 
     }
     if (!best || pages < best.pages) best = { arr, pages, cols, rows };
   }
-  const arr = best!.arr;
+  return { paper, margin, overlap, pw, ph, stepX, stepY, headerH, pieces, ...best! };
+}
+
+/** Number of pages `renderTiledPrintPages` prints for these pieces (empty pages are skipped). */
+export function printPageCount(pieces: PatternPiece[], paper: 'A4' | 'letter' = 'A4'): number {
+  return planPrintTiling(pieces, paper).pages;
+}
+
+export function renderTiledPrintPages(pkg: DesignPackage, opts: { paper: 'A4' | 'letter' }): string[] {
+  const best = planPrintTiling(pkg.pieces, opts.paper);
+  const { paper, margin, overlap, pw, ph, stepX, stepY, headerH } = best;
+  const arr = best.arr;
   const cols = best!.cols;
   const rows = best!.rows;
 
@@ -412,7 +459,7 @@ export function renderTiledPrintPages(pkg: DesignPackage, opts: { paper: 'A4' | 
     `<text x="25" y="58" font-size="3" text-anchor="middle" fill="#555">test square</text>` +
     `<text x="56" y="34" font-size="3" fill="#333">Measure this square before cutting:</text>` +
     `<text x="56" y="39" font-size="3" fill="#333">it must be exactly 5 cm × 5 cm.</text>` +
-    `<text x="56" y="47" font-size="3" fill="#333">Solid line = cut · dashed line = stitch (1.5 cm inside)</text>` +
+    `<text x="56" y="47" font-size="3" fill="#333">Solid line = cut · dashed line = stitch (${f2(pkg.pieces[0]?.seamAllowanceCm ?? 1.5)} cm inside; hem allowances are wider)</text>` +
     `</g>`;
   const css = `<style>${STYLE}</style>`;
   const pages: string[] = [];

@@ -11,6 +11,7 @@ import type {
   SeamSpec,
   StylePreset,
 } from '../types';
+import { zipForOpening } from '../drafting/seams';
 
 /** Everything the instruction and BOM builders need. */
 export interface InstructionContext {
@@ -76,12 +77,37 @@ const EDGE_NAMES: Record<string, string> = {
   'center-front': 'centre front',
   'centre-back': 'centre back',
   'center-back': 'centre back',
+  'cb-zip': 'centre back zip opening',
+  'cf-zip': 'centre front zip opening',
+  'end-start': 'first short end',
+  'end-end': 'second short end',
+  'side-upper': 'upper side',
+  'side-pocket': 'pocket opening',
+  'cap-front': 'front sleeve cap',
+  'cap-back': 'back sleeve cap',
+  'cap-front-upper': 'upper front sleeve cap',
+  'cap-front-lower': 'lower front sleeve cap',
+  'cap-back-upper': 'upper back sleeve cap',
+  'cap-back-lower': 'lower back sleeve cap',
+  'underarm-front': 'front underarm',
+  'underarm-back': 'back underarm',
+  'wrap-edge': 'wrap front',
+  'front-edge': 'front opening',
+  princess: 'princess seam',
+  inner: 'inner long',
+  attach: 'open end',
+  long: 'long',
+  'seam-sf': 'side-front panel',
+  'seam-cf': 'centre-front panel',
+  'seam-sb': 'side-back panel',
+  'seam-cb': 'centre-back panel',
 };
 
-/** "side-left" -> "side left", "cb" -> "centre back". */
+/** "side-left" -> "side left", "cb" -> "centre back", "join-front-skirt-1" -> "lower". */
 export function humanEdge(edgeId: string): string {
   const direct = EDGE_NAMES[edgeId];
   if (direct) return direct;
+  if (/^join-/.test(edgeId)) return 'lower';
   return edgeId
     .split(/[-_]/)
     .map((w) => EDGE_NAMES[w] ?? w)
@@ -117,15 +143,21 @@ export function edgeInstances(p: PatternPiece | undefined): number {
   return Math.max(1, p.cutOnFold ? p.cutCount * 2 : p.cutCount);
 }
 
+const STRIP_ROLES = /^(wrap-tie|neck-binding|waistband)$/;
+
 /** How many times a seam is physically sewn (left + right side, etc.). */
 export function seamRepeats(seam: SeamSpec, idx: PieceIndex): number {
   const a = idx.get(seam.a.pieceId);
   if (!seam.b) {
     if (seam.type === 'dart') return edgeInstances(a);
+    // Strips (ties, bindings, waistbands) are cut on a lengthwise fold: one operation per strip.
+    if (a && STRIP_ROLES.test(a.role)) return Math.max(1, a.cutCount);
     if (seam.type.startsWith('hem')) return 1; // a hem runs continuously around
     return edgeInstances(a);
   }
   const b = idx.get(seam.b.pieceId);
+  // A strip folded onto itself is sewn once per strip cut (a fold-cut strip is still one strip).
+  if (isFoldedJoin(seam, idx)) return Math.max(1, a?.cutCount ?? 1);
   if (seam.b.pieceId === seam.a.pieceId) {
     // Joining copies of the same piece to each other (e.g. centre-back seam).
     return Math.max(1, Math.floor(edgeInstances(a) / 2));
@@ -138,18 +170,39 @@ export function seamLengthCm(seam: SeamSpec, idx: PieceIndex): number {
   return idx.edge(seam.a.pieceId, seam.a.edgeId)?.lengthCm ?? 0;
 }
 
+/**
+ * A seam joining an edge of a piece to the same edge of the same piece is
+ * either two copies sewn together (centre-back seam of a mirrored pair) or one
+ * strip folded onto itself (ties, bindings, loops). Decide from role and note.
+ */
+export function isFoldedJoin(seam: SeamSpec, idx: PieceIndex): boolean {
+  if (!seam.b || seam.a.pieceId !== seam.b.pieceId || seam.a.edgeId !== seam.b.edgeId) return false;
+  const role = idx.get(seam.a.pieceId)?.role ?? '';
+  return /wrap-tie|neck-binding/.test(role) || /\bfold (each|the) [a-z ]*lengthwise/i.test(`${seam.note ?? ''} ${seam.finish}`);
+}
+
 /** Plain-language description of what is joined to what. */
+/** "waist" -> "waist edge", but "first short end" / "pocket opening" stay as they are. */
+export function edgePhrase(edgeId: string, plural = false): string {
+  const h = humanEdge(edgeId);
+  if (/\b(edge|end|opening|seam)$/.test(h)) return plural ? `${h}s` : h;
+  return `${h} edge${plural ? 's' : ''}`;
+}
+
 export function describeJoin(seam: SeamSpec, idx: PieceIndex): string {
   const a = pieceName(idx.get(seam.a.pieceId), seam.a.pieceId);
   const ea = humanEdge(seam.a.edgeId);
-  if (!seam.b) return `the ${ea} edge of the ${a}`;
+  if (!seam.b) return `the ${edgePhrase(seam.a.edgeId)} of the ${a}`;
   const b = pieceName(idx.get(seam.b.pieceId), seam.b.pieceId);
   const eb = humanEdge(seam.b.edgeId);
   if (seam.a.pieceId === seam.b.pieceId) {
-    return ea === eb ? `the two ${a} pieces along their ${ea} edges` : `the ${ea} and ${eb} edges of the ${a}`;
+    if (ea === eb && isFoldedJoin(seam, idx)) return `the ${edgePhrase(seam.a.edgeId)} of each ${a}, folded in half lengthwise`;
+    return ea === eb
+      ? `the two ${a} pieces along their ${edgePhrase(seam.a.edgeId, true)}`
+      : `the ${edgePhrase(seam.a.edgeId)} and the ${edgePhrase(seam.b.edgeId)} of the ${a}`;
   }
-  if (ea === eb) return `the ${a} and ${b} along their ${ea} edges`;
-  return `the ${ea} edge of the ${a} to the ${eb} edge of the ${b}`;
+  if (ea === eb) return `the ${a} and ${b} along their ${edgePhrase(seam.a.edgeId, true)}`;
+  return `the ${edgePhrase(seam.a.edgeId)} of the ${a} to the ${edgePhrase(seam.b.edgeId)} of the ${b}`;
 }
 
 /** Ordered list of point indices of an edge (handles wrap-around on closed paths). */
@@ -239,7 +292,12 @@ export function materialTraits(m: MaterialPreset): MaterialTraits {
  * lone edge (e.g. beside a zip or at a hem), so fall back to zigzag/overlock.
  */
 export function edgeFinish(m: MaterialPreset): string {
-  const rec = m.handling.seamFinish.replace(/\.$/, '');
+  // Pressing is described by each step at the right moment; drop "before
+  // pressing open" style clauses so a hem or zip edge never reads "press open".
+  const rec = m.handling.seamFinish
+    .replace(/\.$/, '')
+    .replace(/[,;]?\s*(?:(?:then|and|or|before|after)\s+)?press(?:ing|ed)?\b[^,.;]*/gi, '')
+    .trim();
   if (/french/i.test(rec)) return 'a narrow zigzag or overlock along each raw edge';
   return rec.charAt(0).toLowerCase() + rec.slice(1);
 }
@@ -259,7 +317,7 @@ export function materialTimeFactor(m: MaterialPreset): number {
 // Closures
 // ---------------------------------------------------------------------------
 
-export const STANDARD_ZIP_LENGTHS_CM = [15, 18, 20, 22, 23, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70];
+export { ZIP_LENGTHS_CM as STANDARD_ZIP_LENGTHS_CM } from '../drafting/seams';
 
 function defaultOpeningCm(category: GarmentDefinition['category']): number {
   switch (category) {
@@ -267,40 +325,45 @@ function defaultOpeningCm(category: GarmentDefinition['category']): number {
     case 'trousers':
       return 18;
     case 'top':
-      return 35;
+      return 20;
     case 'dress':
-      return 50;
+      return 48;
     case 'gown':
-      return 55;
+      return 58;
   }
 }
 
 export interface ZipInfo {
   seam?: SeamSpec;
   kind: 'invisible' | 'lapped';
+  /** Total drafted opening (cm): every zip edge of the main fabric, e.g. bodice + skirt on a gown. */
   openingCm: number;
+  /** Standard zip to buy; the same rule the drafter used (`zipForOpening`). */
   zipLengthCm: number;
 }
 
-/** Zip requirements derived from the zip seam's opening edge (or a sensible default). */
+/** Zip requirements derived from the drafted zip edges (or a sensible default when none is drafted). */
 export function zipInfo(ctx: InstructionContext, idx: PieceIndex): ZipInfo | null {
   const closure = ctx.fit.options.closure;
-  const seam = ctx.seams.find((s) => s.type === 'zip-invisible' || s.type === 'zip-lapped');
+  const zipSeams = ctx.seams.filter((s) => s.type === 'zip-invisible' || s.type === 'zip-lapped');
+  const seam = zipSeams[0];
   if (!seam && closure !== 'invisible-zip' && closure !== 'lapped-zip') return null;
-  const kind: ZipInfo['kind'] =
-    seam ? (seam.type === 'zip-invisible' ? 'invisible' : 'lapped') : closure === 'lapped-zip' ? 'lapped' : 'invisible';
-  const fallback = defaultOpeningCm(ctx.garment.category);
-  let openingCm = fallback;
-  if (seam) {
-    const edge = idx.edge(seam.a.pieceId, seam.a.edgeId);
-    if (edge && edge.lengthCm > 5) {
-      openingCm = edge.kind === 'opening' ? edge.lengthCm : Math.min(edge.lengthCm, fallback);
-    }
+  const type: 'zip-invisible' | 'zip-lapped' = seam ? (seam.type as 'zip-invisible' | 'zip-lapped') : closure === 'lapped-zip' ? 'zip-lapped' : 'zip-invisible';
+  const kind: ZipInfo['kind'] = type === 'zip-invisible' ? 'invisible' : 'lapped';
+  // Each zip seam joins the two halves of one opening edge (a and b are the
+  // same drafted edge on a mirrored pair), so count every distinct edge once.
+  const seen = new Set<string>();
+  let openingCm = 0;
+  for (const s of zipSeams) {
+    const key = `${s.a.pieceId}.${s.a.edgeId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const edge = idx.edge(s.a.pieceId, s.a.edgeId);
+    if (edge) openingCm += edge.lengthCm;
   }
-  const wanted = openingCm + (kind === 'invisible' ? 2 : 0);
-  const zipLengthCm =
-    STANDARD_ZIP_LENGTHS_CM.find((l) => l >= wanted) ?? Math.ceil(wanted / 5) * 5;
-  return { seam, kind, openingCm, zipLengthCm };
+  if (openingCm < 5) openingCm = defaultOpeningCm(ctx.garment.category);
+  openingCm = Math.round(openingCm * 10) / 10;
+  return { seam, kind, openingCm, zipLengthCm: zipForOpening(openingCm, type) };
 }
 
 /** Edge that is an opening (button placket etc.), if drafted. */

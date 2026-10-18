@@ -256,6 +256,12 @@ export interface DesignRequest {
   /** Seam allowance in cm; default 1.5 (1 for knits, 2.5 for gown side seams handled internally). */
   seamAllowanceCm?: number;
   hemAllowanceCm?: number;
+  /**
+   * Heel height (cm) of the shoes the garment will be worn with. Floor-length
+   * hems are drafted to just clear the floor in these shoes. Default: 7 for
+   * gowns and evening/runway occasions, 2 otherwise.
+   */
+  shoeHeelCm?: number;
   name?: string;
 }
 
@@ -276,6 +282,12 @@ export interface FitPlan {
     inseam?: number;
   };
   hemHeightFromFloorCm: number;
+  /**
+   * Heel height (cm) the hem was planned for. `hemHeightFromFloorCm` is measured
+   * on the barefoot body (it can be negative for floor-length hems: barefoot the
+   * hem rests on the floor); in these shoes the body, and the hem, sit this much higher.
+   */
+  shoeHeelCm?: number;
   /** Why these choices look great on this body: plain-language rationale. */
   rationale: string[];
 }
@@ -385,6 +397,12 @@ export interface CuttingPlacement {
   y: number;
   rotationDeg: 0 | 90 | 180 | 270;
   flipped: boolean;
+  /**
+   * Folded layouts only: cut through ONE layer here, because the piece is
+   * needed an odd number of times. Cut it last: lift the top layer away in
+   * this area, cut the piece from the bottom layer only.
+   */
+  singleLayer?: boolean;
 }
 
 export interface CuttingLayout {

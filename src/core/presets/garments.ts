@@ -17,7 +17,7 @@ export const GARMENTS: GarmentDefinition[] = [
     name: 'A-line skirt',
     category: 'skirt',
     description:
-      'A skirt fitted at the waist that flares gently to the hem in the shape of a capital A. Two darts per panel, a side or back zip and a narrow waistband: the classic first garment.',
+      'A skirt fitted at the waist that flares gently to the hem in the shape of a capital A. Fewer waist darts than a straight skirt (closing a dart opens the flare), a centre-back zip and a narrow waistband: the classic first garment.',
     difficulty: 1,
     occasions: ['everyday', 'work'],
     defaults: {

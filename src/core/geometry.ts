@@ -6,7 +6,14 @@
  * the closing segment (last -> first) is implicit.
  * In y-down space a visually clockwise polygon has a POSITIVE shoelace area
  * (see `signedArea`).
+ *
+ * Libraries (wrapped here so callers only ever see `Point` / `Path`):
+ * - bezier-js: cubic curve evaluation, arc length and flattening.
+ * - clipper-lib: polygon offsetting, self-intersection cleanup and boolean
+ *   operations (union / intersection) on integer coordinates (cm × 1000).
  */
+import ClipperLib from 'clipper-lib';
+import { Bezier } from 'bezier-js';
 import type { Path, Point } from './types';
 
 export const EPS = 1e-9;
@@ -195,22 +202,41 @@ export function pointInPolygon(q: Point, poly: Path): boolean {
   return inside;
 }
 
-/** Shortest distance from q to segment ab. */
-export function distToSegment(q: Point, a: Point, b: Point): number {
-  const ab = sub(b, a);
-  const l2 = dot(ab, ab);
-  if (l2 < EPS) return dist(q, a);
-  const t = clamp(dot(sub(q, a), ab) / l2, 0, 1);
-  return dist(q, lerp(a, b, t));
+/** Squared distance from (qx, qy) to segment ab (allocation-free hot path). */
+function distSqToSegment(qx: number, qy: number, a: Point, b: Point): number {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const l2 = abx * abx + aby * aby;
+  let t = l2 < EPS ? 0 : ((qx - a.x) * abx + (qy - a.y) * aby) / l2;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const dx = a.x + abx * t - qx;
+  const dy = a.y + aby * t - qy;
+  return dx * dx + dy * dy;
 }
 
-/** Shortest distance from q to a closed polygon outline. */
-export function distToPolygon(q: Point, poly: Path): number {
-  let d = Infinity;
-  for (let i = 0; i < poly.length; i++) {
-    d = Math.min(d, distToSegment(q, poly[i], poly[(i + 1) % poly.length]));
+/** Shortest distance from q to segment ab. */
+export function distToSegment(q: Point, a: Point, b: Point): number {
+  return Math.sqrt(distSqToSegment(q.x, q.y, a, b));
+}
+
+/**
+ * Shortest distance from q to a closed polygon outline. With `below`, the scan
+ * stops as soon as a distance under that value is found (the result is then
+ * only guaranteed to be < below), which keeps max-min searches cheap.
+ */
+export function distToPolygon(q: Point, poly: Path, below = -Infinity): number {
+  const n = poly.length;
+  const stop = below > 0 ? below * below : -1;
+  let d2 = Infinity;
+  for (let i = 0; i < n; i++) {
+    const s = distSqToSegment(q.x, q.y, poly[i], poly[i + 1 === n ? 0 : i + 1]);
+    if (s < d2) {
+      d2 = s;
+      if (d2 < stop) break;
+    }
   }
-  return d;
+  return Math.sqrt(d2);
 }
 
 /**
@@ -221,13 +247,20 @@ export function interiorPoint(poly: Path, avoid: Point[] = []): Point {
   const b = pathBounds(poly);
   const w = b.maxX - b.minX;
   const h = b.maxY - b.minY;
+  // Label placement does not need every 0.5 cm vertex: a decimated outline
+  // (chord error well under a millimetre on drafted curves) is ~10x cheaper.
+  const stride = Math.max(1, Math.floor(poly.length / 240));
+  const coarse = stride === 1 ? poly : poly.filter((_, i) => i % stride === 0);
   let best = polygonCentroid(poly);
-  let bestScore = pointInPolygon(best, poly) ? score(best) : -Infinity;
+  let bestScore = -Infinity;
+  /** Clearance of q (or anything below the current best, which is all the search needs). */
   function score(q: Point): number {
-    let s = distToPolygon(q, poly);
+    let s = Infinity;
     for (const a of avoid) s = Math.min(s, dist(q, a) * 0.8);
-    return s;
+    if (s <= bestScore) return s;
+    return Math.min(s, distToPolygon(q, coarse, bestScore));
   }
+  if (pointInPolygon(best, poly)) bestScore = score(best);
   const steps = 24;
   for (let i = 1; i < steps; i++) {
     for (let j = 1; j < steps; j++) {
@@ -313,6 +346,14 @@ export function densify(p: Path, maxSeg = 0.5): Path {
   return out;
 }
 
+/** `densify` for a closed polygon (the implicit closing segment is split too). */
+export function densifyClosed(p: Path, maxSeg = 0.5): Path {
+  if (p.length < 3) return [...p];
+  const d = densify([...p, p[0]], maxSeg);
+  d.pop();
+  return d;
+}
+
 /**
  * Resample an open polyline to evenly spaced points by arc length with spacing
  * <= `spacing`. Endpoints are kept; interior corners may be smoothed slightly.
@@ -321,8 +362,23 @@ export function resample(p: Path, spacing = 0.5): Path {
   const total = pathLength(p);
   if (p.length < 2 || total < EPS) return [...p];
   const n = Math.max(1, Math.ceil(total / spacing - 1e-9));
-  const out: Path = [];
-  for (let k = 0; k <= n; k++) out.push(pointAtLength(p, (total * k) / n).point);
+  // Single forward walk (linear time): equivalent to pointAtLength at each
+  // target, which matters for the dense Bézier lookup tables fed in here.
+  const out: Path = [{ ...p[0] }];
+  let acc = 0;
+  let i = 1;
+  let d = dist(p[0], p[1]);
+  for (let k = 1; k < n; k++) {
+    const s = (total * k) / n;
+    while (acc + d < s && i < p.length - 1) {
+      acc += d;
+      i++;
+      d = dist(p[i - 1], p[i]);
+    }
+    const t = d < EPS ? 0 : clamp((s - acc) / d, 0, 1);
+    out.push(lerp(p[i - 1], p[i], t));
+  }
+  out.push({ ...p[p.length - 1] });
   return out;
 }
 
@@ -399,19 +455,24 @@ export function insertAtLengths(p: Path, lengths: number[]): { path: Path; indic
 // Curves
 // ---------------------------------------------------------------------------
 
-/** Cubic Bezier flattened to points <= maxSeg apart (arc-length even). */
+/**
+ * Cubic Bézier flattened to points <= maxSeg apart, evenly spaced by arc
+ * length (bezier-js evaluates the curve; a dense lookup table is resampled).
+ */
 export function cubicBezier(p0: Point, p1: Point, p2: Point, p3: Point, maxSeg = 0.5): Path {
-  const coarse = Math.max(16, Math.ceil((dist(p0, p1) + dist(p1, p2) + dist(p2, p3)) / 0.1));
-  const pts: Path = [];
-  for (let i = 0; i <= coarse; i++) {
-    const t = i / coarse;
-    const u = 1 - t;
-    pts.push({
-      x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-      y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
-    });
-  }
-  return resample(pts, maxSeg);
+  const curve = new Bezier(p0, p1, p2, p3);
+  const hull = dist(p0, p1) + dist(p1, p2) + dist(p2, p3);
+  if (hull < EPS) return [{ ...p0 }, { ...p3 }];
+  const steps = Math.max(16, Math.ceil(hull / 0.1));
+  const lut = curve.getLUT(steps).map((q) => ({ x: q.x, y: q.y }));
+  lut[0] = { ...p0 };
+  lut[lut.length - 1] = { ...p3 };
+  return resample(lut, maxSeg);
+}
+
+/** Exact arc length of a cubic Bézier (Legendre-Gauss quadrature in bezier-js). */
+export function cubicBezierLength(p0: Point, p1: Point, p2: Point, p3: Point): number {
+  return new Bezier(p0, p1, p2, p3).length();
 }
 
 export function quadBezier(p0: Point, p1: Point, p2: Point, maxSeg = 0.5): Path {
@@ -565,49 +626,102 @@ export function isSimplePolygon(p: Path): boolean {
   return selfIntersections(p, 1).length === 0;
 }
 
+// ---------------------------------------------------------------------------
+// Clipper bridge (integer coordinates)
+// ---------------------------------------------------------------------------
+
+/** Clipper works on integers: 1 unit = 0.01 mm. */
+export const CLIPPER_SCALE = 1000;
 /**
- * Remove small self-intersection loops from a closed polygon (as produced by
- * offsetting around reflex corners or tight concave curves). Keeps the larger
- * outer part. `window` bounds how many vertices a removable loop may span.
+ * Clipper's default clean distance (≈ √2 integer units): removes duplicate
+ * vertices and exactly collinear spikes without simplifying flattened curves.
  */
-export function removeLocalLoops(poly: Path, window = 120): Path {
-  let p = [...poly];
-  for (let guard = 0; guard < 200; guard++) {
-    const n = p.length;
-    if (n < 4) return p;
-    let fixed = false;
-    outer: for (let i = 0; i < n; i++) {
-      const a = p[i];
-      const b = p[(i + 1) % n];
-      const maxOff = Math.min(window, n - 2);
-      for (let off = 2; off <= maxOff; off++) {
-        const j = (i + off) % n;
-        if ((j + 1) % n === i) continue;
-        const c = p[j];
-        const d = p[(j + 1) % n];
-        const x = segmentIntersection(a, b, c, d);
-        if (!x) continue;
-        // Two candidate polygons: drop the loop i+1..j, or keep only the loop.
-        // Keep whichever has the larger area (the spurious loop is the small one).
-        const loop: Path = [];
-        for (let k = (i + 1) % n; ; k = (k + 1) % n) {
-          loop.push(p[k]);
-          if (k === j) break;
-        }
-        const rest: Path = [];
-        for (let k = (j + 1) % n; ; k = (k + 1) % n) {
-          rest.push(p[k]);
-          if (k === i) break;
-        }
-        const next: Path = polygonArea([x, ...rest]) >= polygonArea([x, ...loop]) ? [x, ...rest] : [x, ...loop];
-        p = dedupe(next, 1e-7, true);
-        fixed = true;
-        break outer;
-      }
+const CLEAN_DISTANCE = 1.415;
+
+function toClipper(p: Path): ClipperLib.Path {
+  return p.map((q) => ({ X: Math.round(q.x * CLIPPER_SCALE), Y: Math.round(q.y * CLIPPER_SCALE) }));
+}
+
+function fromClipper(p: ClipperLib.Path): Path {
+  return p.map((q) => ({ x: q.X / CLIPPER_SCALE, y: q.Y / CLIPPER_SCALE }));
+}
+
+function clipperArea(p: ClipperLib.Path): number {
+  return Math.abs(ClipperLib.Clipper.Area(p)) / (CLIPPER_SCALE * CLIPPER_SCALE);
+}
+
+/** Largest polygon of a Clipper solution, oriented like `like` (sign of signedArea). */
+function largest(solution: ClipperLib.Paths, orientationSign: number): Path {
+  let best: ClipperLib.Path | null = null;
+  let bestArea = -1;
+  for (const poly of solution) {
+    const a = clipperArea(poly);
+    if (a > bestArea) {
+      bestArea = a;
+      best = poly;
     }
-    if (!fixed) return p;
   }
-  return p;
+  if (!best) return [];
+  const out = fromClipper(best);
+  return Math.sign(signedArea(out)) === orientationSign || orientationSign === 0 ? out : reversePath(out);
+}
+
+/**
+ * Resolve self-intersections of a closed polygon (e.g. the swallow-tail loops
+ * an offset produces at concave corners or tight curves) by a positive-fill
+ * union, and keep the largest resulting outline. Orientation is preserved.
+ */
+export function cleanPolygon(poly: Path, maxSeg = 0.5): Path {
+  if (poly.length < 3) return [...poly];
+  const sign = signedArea(poly) >= 0 ? 1 : -1;
+  // Clipper's pftPositive keeps regions with positive winding; orient so the
+  // intended interior winds positively in Clipper's sense.
+  let cp = toClipper(poly);
+  if (!ClipperLib.Clipper.Orientation(cp)) cp = [...cp].reverse();
+  const c = new ClipperLib.Clipper();
+  c.StrictlySimple = true;
+  c.PreserveCollinear = true;
+  c.AddPath(cp, ClipperLib.PolyType.ptSubject, true);
+  const solution: ClipperLib.Paths = [];
+  c.Execute(ClipperLib.ClipType.ctUnion, solution, ClipperLib.PolyFillType.pftPositive, ClipperLib.PolyFillType.pftPositive);
+  // drop duplicate vertices and collinear spikes (left by tiny source segments)
+  const cleaned = ClipperLib.Clipper.CleanPolygons(solution, CLEAN_DISTANCE);
+  const out = largest(cleaned, sign);
+  return out.length >= 3 ? densifyClosed(dedupe(out, 1e-6, true), maxSeg) : [...poly];
+}
+
+/** Area of the intersection of two simple polygons (cm²). */
+export function polygonIntersectionArea(a: Path, b: Path): number {
+  if (a.length < 3 || b.length < 3) return 0;
+  const c = new ClipperLib.Clipper();
+  c.AddPath(toClipper(a), ClipperLib.PolyType.ptSubject, true);
+  c.AddPath(toClipper(b), ClipperLib.PolyType.ptClip, true);
+  const solution: ClipperLib.Paths = [];
+  c.Execute(ClipperLib.ClipType.ctIntersection, solution, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  return solution.reduce((s, p) => s + clipperArea(p), 0);
+}
+
+/**
+ * True when two polygons overlap by more than `tolerance` cm² (touching
+ * along an edge, such as two halves of an opened-out fold piece, is allowed).
+ */
+export function polygonsOverlap(a: Path, b: Path, tolerance = 0.05): boolean {
+  const ba = pathBounds(a);
+  const bb = pathBounds(b);
+  if (ba.maxX <= bb.minX || bb.maxX <= ba.minX || ba.maxY <= bb.minY || bb.maxY <= ba.minY) return false;
+  return polygonIntersectionArea(a, b) > tolerance;
+}
+
+/** Area covered by the union of several polygons (cm²). */
+export function unionArea(polys: Path[]): number {
+  const valid = polys.filter((p) => p.length >= 3);
+  if (valid.length === 0) return 0;
+  const c = new ClipperLib.Clipper();
+  c.AddPaths(valid.map(toClipper), ClipperLib.PolyType.ptSubject, true);
+  const solution: ClipperLib.Paths = [];
+  c.Execute(ClipperLib.ClipType.ctUnion, solution, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+  // holes come back with opposite orientation: signed sum gives the covered area
+  return Math.abs(solution.reduce((s, p) => s + ClipperLib.Clipper.Area(p), 0)) / (CLIPPER_SCALE * CLIPPER_SCALE);
 }
 
 // ---------------------------------------------------------------------------
@@ -616,9 +730,12 @@ export function removeLocalLoops(poly: Path, window = 120): Path {
 
 /**
  * Offset a closed polygon outward with a distance per segment
- * (segment i runs p[i] -> p[i+1 mod n]). Distances may be 0 (e.g. fold lines).
- * Works for either orientation. Corners are mitred (bevelled beyond
- * `miterLimit` x distance) and local loops are removed.
+ * (segment i runs p[i] -> p[i+1 mod n]). Distances may be 0 (e.g. fold lines),
+ * which is why this cannot be a single uniform Clipper offset: each segment is
+ * shifted along its own outward normal, neighbours are joined with mitres
+ * (bevelled beyond `miterLimit` x distance), and the swallow-tail loops that
+ * appear at concave corners are removed by a Clipper positive-fill union.
+ * Works for either orientation and keeps it.
  */
 export function offsetClosedPathVariable(p: Path, dists: number[], miterLimit = 4): Path {
   const n = p.length;
@@ -660,13 +777,25 @@ export function offsetClosedPathVariable(p: Path, dists: number[], miterLimit = 
       out.push(a, b);
     }
   }
-  return removeLocalLoops(dedupe(out, 1e-7, true));
+  return cleanPolygon(dedupe(out, 1e-7, true));
 }
 
-/** Offset a closed path outward by a uniform distance (negative = inward). */
-export function offsetClosedPath(p: Path, d: number): Path {
-  if (d >= 0) return offsetClosedPathVariable(p, new Array(p.length).fill(d));
-  return offsetClosedPathVariable(reversePath(p), new Array(p.length).fill(-d));
+/**
+ * Offset a closed path by a uniform distance (positive = outward, negative =
+ * inward) with Clipper's mitred offset. Orientation is preserved.
+ */
+export function offsetClosedPath(p: Path, d: number, miterLimit = 4): Path {
+  if (p.length < 3) return [...p];
+  if (Math.abs(d) < EPS) return p.map((q) => ({ ...q }));
+  const sign = signedArea(p) >= 0 ? 1 : -1;
+  let cp = toClipper(p);
+  // ClipperOffset grows positively oriented (Clipper sense) polygons for d > 0.
+  if (!ClipperLib.Clipper.Orientation(cp)) cp = [...cp].reverse();
+  const co = new ClipperLib.ClipperOffset(miterLimit, 0.01 * CLIPPER_SCALE);
+  co.AddPath(cp, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+  const solution: ClipperLib.Paths = [];
+  co.Execute(solution, d * CLIPPER_SCALE);
+  return densifyClosed(largest(ClipperLib.Clipper.CleanPolygons(solution, CLEAN_DISTANCE), sign), 0.5);
 }
 
 /** Offset an OPEN polyline sideways by d (positive = left-hand normal in y-down, i.e. outward for clockwise shapes). */

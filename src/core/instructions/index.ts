@@ -2,6 +2,7 @@ import type { FabricLayer, InstructionStep, MaterialPreset, PatternPiece, SeamSp
 import { suggestLining } from '../presets';
 import { buildBom, metresForLayer, FABRIC_MARGIN } from './bom';
 import { buildGlossary, detectTerms } from './glossary';
+import { outlineGroups, printPageCount } from '../svg';
 import {
   allowanceAtEdge,
   buttonCount,
@@ -20,7 +21,16 @@ import {
   type InstructionContext,
   type PieceIndex,
 } from './shared';
-import { basteStep, dartStep, effectiveSeamType, machineSetup, seamStep, type StepDraft, type TechniqueEnv } from './techniques';
+import {
+  basteStep,
+  effectiveSeamType,
+  groupSeams,
+  machineSetup,
+  seamGroupStep,
+  seamStep,
+  type StepDraft,
+  type TechniqueEnv,
+} from './techniques';
 
 export type { InstructionContext } from './shared';
 export { buildBom } from './bom';
@@ -80,9 +90,40 @@ function finishedSummary(ctx: InstructionContext): string[] {
   if (f.lengthFromShoulder !== undefined) out.push(`Length from shoulder: ${fmt(f.lengthFromShoulder)} cm`);
   if (f.inseam !== undefined) out.push(`Inside leg: ${fmt(f.inseam)} cm`);
   if (f.sleeveLength !== undefined && f.sleeveLength > 0) out.push(`Sleeve length: ${fmt(f.sleeveLength)} cm`);
-  out.push(`Hem height: ${fmt(ctx.fit.hemHeightFromFloorCm)} cm above the floor`);
+  out.push(hemHeightLine(ctx));
   return out;
 }
+
+/** Hem height in plain words: in the planned shoes for floor lengths, flagged when it rests on estimates. */
+export function hemHeightLine(ctx: InstructionContext): string {
+  const { fit } = ctx;
+  const heel = fit.shoeHeelCm ?? 0;
+  const h = fit.hemHeightFromFloorCm;
+  const base =
+    fit.options.length === 'floor' && heel > 0
+      ? `Hem height: ${fmt(h + heel)} cm above the floor in your ${fmt(heel)} cm heels (${h < 0 ? `barefoot it rests ${fmt(-h)} cm on the floor` : `${fmt(h)} cm barefoot`})`
+      : `Hem height: ${fmt(h)} cm above the floor`;
+  return hemFromEstimate(ctx) ? `${base}. This height is estimated from your height: check it at the hem step.` : base;
+}
+
+/** Whether the planned hem height depends on estimated leg measurements. */
+export function hemFromEstimate(ctx: InstructionContext): boolean {
+  const est = new Set(ctx.measurements.estimated);
+  return ctx.garment.category !== 'top' && (est.has('waistToFloorCm') || est.has('waistToKneeCm') || est.has('inseamCm'));
+}
+
+/** Seams that decide the fit (side, inseam, crotch); used to decide whether a muslin is worth it. */
+function hasFitSeams(ctx: InstructionContext): boolean {
+  const idx = indexPieces(ctx.pieces);
+  return ctx.seams.some((s) => isFitSeam(s, idx));
+}
+
+const SAFETY: string[] = [
+  'Safety: keep your fingers at least 2 cm from the needle and guide the fabric, never push it under the foot.',
+  'Never sew over pins: pull each pin out just before it reaches the presser foot (a needle hitting a pin can snap and fly).',
+  'A steam iron runs at 150-230 °C and the steam burns: keep your hand away from the steam holes, stand the iron upright between presses and unplug it when you stop.',
+  'Close your shears and keep pins in a pin cushion or magnetic dish, away from children and pets.',
+];
 
 function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   const { material: m, garment, style, fit } = ctx;
@@ -92,7 +133,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   const opts = fit.options;
 
   const choices = [
-    `${garment.name} in ${m.name.toLowerCase()}, ${style.name} style`,
+    `${garment.name} in ${m.name}, ${style.name} style`,
     `${opts.fit} fit`,
     garment.allowed.length.length ? `${opts.length} length` : null,
     garment.allowed.neckline.length ? `${opts.neckline} neckline` : null,
@@ -116,8 +157,10 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
       {
         tips: [
           ...(fit.rationale.length ? [`Why it is designed this way: ${fit.rationale[0]}`] : []),
-          ...(garment.difficulty >= 3 || (m.pricePerMeterEur[0] + m.pricePerMeterEur[1]) / 2 > 40
-            ? ['Consider sewing a quick muslin (practice version) in cheap cotton first to check the fit before cutting your good fabric.']
+          ...(hasFitSeams(ctx) || garment.difficulty >= 3 || (m.pricePerMeterEur[0] + m.pricePerMeterEur[1]) / 2 > 40
+            ? [
+                `Sew a quick muslin (a practice version in cheap cotton) of the main pieces first${garment.difficulty <= 2 ? ': even on a first garment it is the surest way to check the fit' : ''}. Fix the fit on the muslin, transfer the changes to the paper pieces, then cut your good fabric.`,
+              ]
             : []),
         ],
         minutes: 10,
@@ -139,7 +182,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
           ? `${m.name} can shrink about ${fmt(m.shrinkagePct)} %: on ${fmt(selfM)} m that is roughly ${fmt(shrinkCm, 0)} cm. Shrinking it now means your finished garment keeps its size.`
           : null,
         hasLining
-          ? `Treat the lining (${env.lining.name.toLowerCase()}) the same way: ${env.lining.handling.preTreatment}`
+          ? `Treat the lining (${env.lining.name}) the same way: ${env.lining.handling.preTreatment}`
           : null,
         'When it is dry, press out all creases on the wrong side; folds and wrinkles distort pattern pieces when you cut.',
         `Pressing: ${m.handling.pressing}`,
@@ -156,7 +199,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   steps.push(
     draft(
       'prepare',
-      'Gather your tools and set up the machine',
+      'Collect your tools and set up the machine',
       [
         'Collect these tools before you start:',
         ...tools.map((b) => `- ${b.name}${b.essential ? '' : ' (helpful, optional)'}${b.spec ? `: ${b.spec}` : ''}`),
@@ -164,7 +207,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
         hasLining ? `For the lining you will later switch to: ${machineSetup(env.lining)}` : null,
         'Sew a test seam on two layers of fabric scrap. The stitches should look the same on both sides; if loops show on one side, adjust the tension dial a little and test again.',
       ],
-      { tips: ['Wind two bobbins now so you do not run out halfway through a seam.'], minutes: 15 },
+      { tips: ['Wind two bobbins now so you do not run out halfway through a seam.'], warnings: SAFETY, minutes: 15 },
     ),
   );
 
@@ -173,7 +216,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
       'prepare',
       'Print the pattern and check the test square',
       [
-        'Print the tiled pattern pages at 100 % ("actual size"). Switch off any "fit to page" or scaling option in the print dialogue.',
+        `Print the ${printPageCount(ctx.pieces, 'A4')} tiled pattern pages (A4; Letter paper also works) at 100 % ("actual size"). Switch off any "fit to page" or scaling option in the print dialogue.`,
         'On page 1, measure the test square with a ruler. It must be exactly 5 cm on each side (within 1 mm).',
         'If it is wrong, check the print settings and print page 1 again before printing the rest.',
       ],
@@ -184,11 +227,14 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
     ),
   );
 
-  const pieceLines = LAYER_ORDER.flatMap((layer) =>
-    ctx.pieces
-      .filter((p) => p.layer === layer)
-      .map((p) => `- ${p.name}${layer === 'self' ? '' : ` (${layer})`}`),
-  );
+  // Pieces with an identical outline (a waistband and its interfacing) share
+  // one printed paper piece: list it once and say what else it is used for.
+  const ordered = LAYER_ORDER.flatMap((layer) => ctx.pieces.filter((p) => p.layer === layer));
+  const pieceLines = outlineGroups(ordered, true).map((g) => {
+    const [first, ...rest] = g;
+    const reuse = rest.length ? ` (also used to cut the ${listJoin(rest.map((p) => `${p.layer === 'interfacing' ? 'interfacing' : p.layer}`))}: there is no separate paper piece for it)` : '';
+    return `- ${first!.name}${first!.layer === 'self' ? '' : ` (${first!.layer})`}${reuse}`;
+  });
   steps.push(
     draft(
       'prepare',
@@ -196,7 +242,7 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
       [
         'Lay the pages out in order using the grid labels in the corners (A1, A2, B1 ...): letters are rows, numbers are columns.',
         'Trim the margin on one side of each overlap, line up the printed lines exactly, and tape the pages together on the front and back.',
-        'Cut out each paper piece along the outer cutting line (the seam allowance is already included). You should have:',
+        `Cut out each paper piece along the outer cutting line (the seam allowance is already included). You should have ${pieceLines.length} paper pieces:`,
         ...pieceLines,
         'Write the piece name and "right side up" on any piece where it is not already printed.',
       ],
@@ -214,9 +260,17 @@ function prepareSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
 // Cut + mark
 // ---------------------------------------------------------------------------
 
-function cutInstruction(p: PatternPiece, folded: boolean): string {
+function cutInstruction(p: PatternPiece, folded: boolean, paperOf?: PatternPiece): string {
   const n = p.cutCount;
   const parts: string[] = [`${p.name}: cut ${n}`];
+  if (paperOf) parts.push(`using the ${paperOf.name} paper piece again`);
+  if (folded && !p.cutOnFold && n % 2 === 1) {
+    parts.push(
+      n === 1
+        ? '— cut through ONE layer only: cut it last, lift the top layer away around it and cut the bottom layer alone (cutting both layers would give you two)'
+        : `— ${n - 1} come from cutting through both layers; cut the last one through ONE layer only (lift the top layer away first)`,
+    );
+  }
   if (p.cutOnFold) {
     parts.push(
       folded
@@ -234,6 +288,13 @@ function cutInstruction(p: PatternPiece, folded: boolean): string {
   return `- ${parts.join(' ')}`;
 }
 
+/** The printed piece whose paper this piece is cut from, when it has no paper piece of its own. */
+function paperPieceOf(p: PatternPiece, all: PatternPiece[]): PatternPiece | undefined {
+  const ordered = LAYER_ORDER.flatMap((layer) => all.filter((q) => q.layer === layer));
+  const g = outlineGroups(ordered, true).find((x) => x.includes(p));
+  return g && g[0] !== p ? g[0] : undefined;
+}
+
 function cutSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
   const steps: StepDraft[] = [];
   for (const layer of LAYER_ORDER) {
@@ -243,7 +304,7 @@ function cutSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
     const mat = layerMaterial(layer, env.main, env.lining);
     const t = mat ? materialTraits(mat) : null;
     const folded = layout?.fold === 'folded';
-    const fabricLabel = layer === 'self' ? mat!.name.toLowerCase() : layer === 'lining' ? `lining (${mat!.name.toLowerCase()})` : 'interfacing';
+    const fabricLabel = layer === 'self' ? mat!.name : layer === 'lining' ? `lining (${mat!.name})` : 'interfacing';
     const width = layout?.fabricWidthCm ?? (layer === 'self' ? env.main.widthCm : layer === 'lining' ? 140 : 90);
     const copies = pieces.reduce((a, p) => a + Math.max(1, p.cutCount), 0);
 
@@ -254,9 +315,14 @@ function cutSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
       layout
         ? `Follow the ${layer} cutting layout diagram: it uses about ${fmt(layout.lengthCm, 0)} cm of fabric length.`
         : null,
-      'Place each paper piece so its grainline arrow is exactly parallel to the selvedge: measure from both ends of the arrow to the selvedge; the two numbers must be the same.',
+      layer === 'interfacing' && layout?.placements.some((pl) => pl.rotationDeg % 180 !== 0)
+        ? 'Interfacing has no grain: place the paper pieces exactly as in the layout diagram, turned across the width where shown.'
+        : 'Place each paper piece so its grainline arrow is exactly parallel to the selvedge: measure from both ends of the arrow to the selvedge; the two numbers must be the same.',
       'Cut these pieces:',
-      ...pieces.map((p) => cutInstruction(p, folded)),
+      ...pieces.map((p) => cutInstruction(p, folded, paperPieceOf(p, ctx.pieces))),
+      folded && pieces.some((p) => !p.cutOnFold && p.cutCount % 2 === 1)
+        ? 'On the layout, single-layer pieces are drawn with a dashed red outline.'
+        : null,
       'Cut with long, smooth strokes, keeping the lower blade on the table. Cut notches as small outward triangles or snip them later (next step); never cut them off.',
       'Leave each paper piece attached to its fabric piece until it has been marked.',
     ];
@@ -269,6 +335,8 @@ function cutSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
       tips.push(mat.handling.cuttingTips);
       if (t.slippery) warnings.push('This fabric slides: cut a single layer at a time, ideally on top of paper or a cotton sheet, and use pattern weights.');
       if (t.pinInAllowanceOnly) warnings.push('Pins leave holes: use pattern weights and pin only within the seam allowance.');
+    } else if (layout?.placements.some((pl) => pl.rotationDeg % 180 !== 0)) {
+      tips.push('Fusible interfacing has no grain, so long strips are laid across its width as in the layout: it saves most of the interfacing.');
     } else {
       tips.push('Cut the interfacing on the same grain as the fabric piece it supports, so they behave together.');
     }
@@ -277,7 +345,7 @@ function cutSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
         pieceIds: pieces.map((p) => p.id),
         tips,
         warnings,
-        minutes: minutes((10 + copies * 6) * (mat ? materialTimeFactor(mat) : 1)),
+        minutes: minutes((10 + copies * 5) * (mat ? materialTimeFactor(mat) : 1)),
       }),
     );
   }
@@ -318,7 +386,7 @@ function markSteps(ctx: InstructionContext, env: TechniqueEnv): StepDraft[] {
             ? "Chalk and pens may stain or not show on this fabric: tailor's tacks in a contrasting silk or cotton thread are safest."
             : 'Test your marking pen or chalk on a scrap first to make sure it comes out.',
         ],
-        minutes: minutes((5 + marked.length * 3 + dartTotal * 4) * materialTimeFactor(env.main)),
+        minutes: minutes((5 + marked.length * 3 + dartTotal * 2) * materialTimeFactor(env.main)),
       }),
     );
   }
@@ -364,13 +432,15 @@ function isFitSeam(s: SeamSpec, idx: PieceIndex): boolean {
   if (!s.b) return false;
   if (s.type !== 'plain' && s.type !== 'french') return false;
   if (idx.get(s.a.pieceId)?.layer !== 'self') return false;
+  const roles = [idx.get(s.a.pieceId)?.role, idx.get(s.b.pieceId)?.role];
+  if (roles.some((r) => !r || /pocket-bag|waistband|wrap-tie|binding|facing/.test(r))) return false;
   return FIT_EDGE_RE.test(`${s.a.edgeId} ${s.b.edgeId}`);
 }
 
 function staystitchStep(ctx: InstructionContext, env: TechniqueEnv): StepDraft | null {
   const targets = ctx.pieces
     .filter((p) => p.layer !== 'interfacing' && !/waistband|facing|binding|tie/.test(p.role))
-    .map((p) => ({ p, edges: p.edges.filter((e) => e.kind !== 'fold' && /neck|armhole|waist/i.test(e.id)) }))
+    .map((p) => ({ p, edges: p.edges.filter((e) => e.kind !== 'fold' && /neck|armhole|waist|wrap/i.test(e.id)) }))
     .filter((x) => x.edges.length);
   if (!targets.length) return null;
   const sa = targets[0]!.p.seamAllowanceCm || 1.5;
@@ -518,7 +588,7 @@ function hemCheckStep(ctx: InstructionContext, env: TechniqueEnv, hemSeams: Seam
       ? 'Hang the garment on a hanger for at least 24 hours first: the bias parts of the hem stretch and drop, and you want that to happen before hemming, not after.'
       : null,
     `Put the garment on with the shoes and underwear you will wear with it${floor ? ' (heel height changes a floor-length hem completely)' : ''}.`,
-    `The planned hem sits ${fmt(fit.hemHeightFromFloorCm)} cm above the floor${
+    `The planned hem sits ${fmt(fit.hemHeightFromFloorCm + (floor ? (fit.shoeHeelCm ?? 0) : 0))} cm above the floor${floor && (fit.shoeHeelCm ?? 0) > 0 ? ` in your ${fmt(fit.shoeHeelCm ?? 0)} cm heels` : ''}${
       fit.finished.lengthFromWaist !== undefined ? `, ${fmt(fit.finished.lengthFromWaist)} cm below your natural waist` : ''
     }${fit.finished.inseam !== undefined ? ` (inside leg ${fmt(fit.finished.inseam)} cm)` : ''}.`,
     'Ask your helper to stand a long ruler upright on the floor and pin along the hem fold at that height all the way round, while you turn slowly. Do not look down; it changes how the hem falls.',
@@ -526,16 +596,19 @@ function hemCheckStep(ctx: InstructionContext, env: TechniqueEnv, hemSeams: Seam
       ? `Check in the mirror. You can move the hem up by several centimetres or down by up to about ${fmt(H - 1)} cm (the hem allowance is ${fmt(H)} cm).`
       : `Check in the mirror. You can shorten the hem freely, but there is almost no room to lengthen it (the hem allowance is only ${fmt(H)} cm).`,
     curved ? 'If the hem is now uneven after hanging, trim the raw edge so the allowance is the same depth all the way round.' : null,
+    hemFromEstimate(ctx)
+      ? 'Your leg length was estimated from your height, so trust the mirror and the ruler here rather than the planned number.'
+      : null,
   ];
   return draft('fit', 'Check the hem length', lines, {
     seamIds: hemSeams.map((s) => s.id),
     pieceIds: [...new Set(hemSeams.map((s) => s.a.pieceId))],
     tips: [
-      ...(fit.rationale.filter((r) => /hem|length|calf|knee|ankle|floor/i.test(r)).slice(0, 2).map((r) => `Why this length: ${r}`)),
+      ...(fit.rationale.filter((r) => /\bhem\b|\bcalf|\bknee|\bankle|\bfloor\b|\bmidi\b|\bmini\b/i.test(r)).slice(0, 2).map((r) => `Why this length: ${r}`)),
       'A hem marker or a friend with a ruler gives a far more even hem than measuring the garment flat.',
     ],
     warnings: [],
-    checkpoint: `Before hemming: hem fold at ${fmt(fit.hemHeightFromFloorCm)} cm from the floor, level all round, wearing the right shoes.`,
+    checkpoint: `Before hemming: hem fold at ${fmt(fit.hemHeightFromFloorCm + (floor ? (fit.shoeHeelCm ?? 0) : 0))} cm from the floor, level all round, wearing the right shoes.`,
     minutes: curved ? 25 : 15,
   });
 }
@@ -576,11 +649,24 @@ function constructSteps(ctx: InstructionContext, env: TechniqueEnv): { steps: St
   const zipSeams = sorted.filter((s) => s.type === 'zip-invisible' || s.type === 'zip-lapped');
   let fitDone = fitStage === null;
   let hemChecked = false;
+  // Fit seams are basted at their own assembly stage (consecutive ones merged
+  // into one step) so the step order follows seam.stage even when other seams
+  // (zips, pocket bags) are staged between them. The try-on and the permanent
+  // stitching follow once the last fit seam is basted.
+  const basted = new Set<string>();
+  let pendingBaste: SeamSpec[] = [];
+  const flushBaste = () => {
+    if (!pendingBaste.length) return;
+    steps.push(basteStep(pendingBaste, env, basted.size > 0));
+    for (const s of pendingBaste) basted.add(s.id);
+    pendingBaste = [];
+  };
 
   const emitFit = () => {
     if (fitDone) return;
     fitDone = true;
-    steps.push(basteStep(fitSeams, env));
+    pendingBaste.push(...fitSeams.filter((s) => !basted.has(s.id) && !pendingBaste.includes(s)));
+    flushBaste();
     const zipPending = zipSeams.some((z) => z.stage > (fitStage ?? 0));
     steps.push(fitCheckStep(ctx, env, zipPending, fitSeams));
     for (const s of fitSeams) {
@@ -593,27 +679,22 @@ function constructSteps(ctx: InstructionContext, env: TechniqueEnv): { steps: St
     }
   };
 
-  for (let i = 0; i < sorted.length; i++) {
-    const s = sorted[i]!;
-    if (!fitDone && fitStage !== null && s.stage > fitStage) emitFit();
-    if (fitIds.has(s.id)) continue;
-    if (s.type.startsWith('hem') && !hemChecked) {
-      emitFit();
-      hemChecked = true;
-      steps.push(hemCheckStep(ctx, env, sorted.filter((x) => x.type.startsWith('hem'))));
-    }
-    if (s.type === 'dart') {
-      const group = [s];
-      while (i + 1 < sorted.length && sorted[i + 1]!.type === 'dart' && sorted[i + 1]!.stage === s.stage) {
-        group.push(sorted[++i]!);
+  const stages = [...new Set(sorted.map((s) => s.stage))];
+  const lastSleeveStage = Math.max(-Infinity, ...sorted.filter((s) => s.type === 'set-in-sleeve').map((s) => s.stage));
+  for (const stage of stages) {
+    if (!fitDone && fitStage !== null && stage > fitStage) emitFit();
+    if (!fitDone) pendingBaste.push(...sorted.filter((s) => s.stage === stage && fitIds.has(s.id)));
+    const here = sorted.filter((s) => s.stage === stage && !fitIds.has(s.id));
+    for (const group of groupSeams(here, env)) {
+      const first = group[0]!;
+      if (first.type.startsWith('hem') && !hemChecked) {
+        emitFit();
+        hemChecked = true;
+        steps.push(hemCheckStep(ctx, env, sorted.filter((x) => x.type.startsWith('hem'))));
       }
-      steps.push(dartStep(group, env));
-      continue;
-    }
-    steps.push(seamStep(s, env));
-    if (s.type === 'set-in-sleeve') {
-      const next = sorted[i + 1];
-      if (!next || next.type !== 'set-in-sleeve') {
+      flushBaste();
+      steps.push(seamGroupStep(group, env));
+      if (first.type === 'set-in-sleeve' && stage === lastSleeveStage) {
         steps.push(sleeveCheckStep(ctx, sorted.filter((x) => x.type === 'set-in-sleeve')));
       }
     }

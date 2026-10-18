@@ -6,7 +6,7 @@
 import {
   ACESFilmicToneMapping,
   Box3,
-  PCFSoftShadowMap,
+  PCFShadowMap,
   PerspectiveCamera,
   SRGBColorSpace,
   Vector3,
@@ -77,7 +77,7 @@ export function mountViewer(container: HTMLElement, pkg: FigureSource, options: 
   renderer.toneMapping = ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = PCFSoftShadowMap;
+  renderer.shadowMap.type = PCFShadowMap;
   if (options.background) renderer.setClearColor(options.background, 1);
   else renderer.setClearColor(0x000000, 0);
   const canvas = renderer.domElement;

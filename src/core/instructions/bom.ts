@@ -13,6 +13,8 @@ import {
   zipInfo,
   type InstructionContext,
 } from './shared';
+import { printPageCount } from '../svg';
+import { GOWN_BONING, GOWN_HORSEHAIR, GOWN_WAIST_STAY, WRAP_STAY_TAPE } from '../drafting/garments/bodiced';
 
 /** Shrinkage + cutting-mistake margin applied to every fabric length. */
 export const FABRIC_MARGIN = 0.1;
@@ -126,13 +128,17 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
   if (hasLayer('interfacing')) {
     const width = organzaInterfacing ? 114 : LAYOUT_WIDTH_FALLBACK.interfacing;
     const ifM = metresForLayer('interfacing', ctx.layouts, ctx.pieces, width, FABRIC_MARGIN);
+    // A gown's interfacing layer is a full sew-in underlining that carries the boning.
+    const underlining = ctx.pieces.some((p) => p.layer === 'interfacing' && /underlining/i.test(p.name));
     items.push({
       kind: 'interfacing',
-      name: organzaInterfacing ? 'Silk organza (sew-in interfacing)' : 'Fusible interfacing',
+      name: underlining ? 'Cotton coutil or batiste (sew-in underlining)' : organzaInterfacing ? 'Silk organza (sew-in interfacing)' : 'Fusible interfacing',
       quantity: Math.max(0.3, ifM),
       unit: 'm',
-      spec: m.handling.interfacing,
-      estCostEur: money(Math.max(0.3, ifM) * (organzaInterfacing ? 40 : 8)),
+      spec: underlining
+        ? 'Firm, closely woven cotton: it is basted to every bodice panel and holds the boning channels'
+        : m.handling.interfacing,
+      estCostEur: money(Math.max(0.3, ifM) * (underlining ? 14 : organzaInterfacing ? 40 : 8)),
       essential: true,
     });
   }
@@ -210,6 +216,71 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
     });
   }
 
+  // ---- structure and stabilising (from the drafted operations) ------------
+  const stay = ctx.seams.find((x) => x.id === 'wrap-edge-stay');
+  if (stay) {
+    const len = Math.ceil(seamLengthCm(stay, idx) * seamRepeats(stay, idx) + 20);
+    items.push({
+      kind: 'notion',
+      name: t.knit ? 'Clear elastic' : 'Stay tape',
+      quantity: len,
+      unit: 'cm',
+      spec: `${WRAP_STAY_TAPE}: ${len} cm to stabilise both bias wrap edges so the crossover does not stretch and gape`,
+      estCostEur: money((len / 100) * 2),
+      essential: true,
+    });
+  }
+  if (ctx.seams.some((x) => x.id === 'waist-stay')) {
+    const len = Math.ceil(ctx.measurements.waistCm + 5);
+    items.push({
+      kind: 'notion',
+      name: 'Petersham ribbon (waist stay)',
+      quantity: len,
+      unit: 'cm',
+      spec: `${GOWN_WAIST_STAY}, ${len} cm (your waist + 5 cm), plus one large hook and eye to close it`,
+      estCostEur: money((len / 100) * 3 + 1),
+      essential: true,
+    });
+  }
+  const boning = ctx.seams.filter((x) => x.id.startsWith('boning-'));
+  if (boning.length) {
+    // one channel per seam on each side of the body, boning 2 cm shorter than each channel
+    const cm = boning.reduce((a, x) => a + 2 * Math.max(0, seamLengthCm(x, idx) - 5), 0);
+    const metres = Math.round(ceilTo((cm * 1.1) / 100, 0.5) * 10) / 10;
+    items.push({
+      kind: 'notion',
+      name: 'Boning and channelling',
+      quantity: metres,
+      unit: 'm',
+      spec: `${GOWN_BONING}, ${metres} m for ${boning.length * 2} channels, with the same length of 1.5 cm channel tape and tip caps`,
+      estCostEur: money(metres * 6),
+      essential: true,
+    });
+  }
+  if (ctx.garment.id === 'ball-gown') {
+    const hem = Math.ceil(((ctx.fit.finished.hem ?? 400) + 10) / 10) / 10;
+    items.push(
+      {
+        kind: 'notion',
+        name: 'Horsehair braid',
+        quantity: hem,
+        unit: 'm',
+        spec: `${GOWN_HORSEHAIR}, ${hem} m (the hem circumference + 10 cm) so the hem stands away from the body`,
+        estCostEur: money(hem * 2.5),
+        essential: true,
+      },
+      {
+        kind: 'notion',
+        name: 'Petticoat',
+        quantity: 1,
+        unit: 'pcs',
+        spec: 'A full-length tulle or crinoline petticoat, or about 3 m of stiff nylon tulle to gather one: the skirt is drafted to sit over it',
+        estCostEur: 45,
+        essential: true,
+      },
+    );
+  }
+
   // ---- thread -------------------------------------------------------------
   let threadM = 0;
   for (const s of ctx.seams) {
@@ -242,23 +313,29 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
   const hasDarts = ctx.seams.some((s) => s.type === 'dart') || ctx.pieces.some((p) => p.darts.length > 0);
   const hasSleeves = ctx.seams.some((s) => s.type === 'set-in-sleeve');
   const hasFacings = ctx.pieces.some((p) => /facing|wrap-tie|waistband/.test(p.role));
-  const tool = (name: string, spec: string, cost: number, essential = true): BomItem => ({
+  const tool = (name: string, spec: string, cost: number, essential = true, quantity = 1, unit: BomItem['unit'] = 'pcs'): BomItem => ({
     kind: 'tool',
     name,
-    quantity: 1,
-    unit: 'pcs',
+    quantity,
+    unit,
     spec,
     estCostEur: cost,
     essential,
   });
+  const pages = printPageCount(ctx.pieces, 'A4');
 
   items.push(
+    tool('Sewing machine', 'Any home machine with straight and zigzag stitch, threaded and with a full bobbin: you need one for this project (borrow one, or book time at a sewing café)', 0),
+    tool('Printer and paper', `Prints the 1:1 pattern on ${pages} sheets of A4 (or Letter) paper at 100 % scale`, 2, true, pages, 'pcs'),
     tool('Fabric shears', '20-25 cm dressmaking shears, used only on fabric', 25),
     tool('Paper scissors', 'For cutting out the printed pattern (paper blunts fabric shears)', 5),
     tool(
       t.pinInAllowanceOnly || m.fiber === 'silk' ? 'Fine silk pins' : 'Glass-head pins',
       t.pinInAllowanceOnly || m.fiber === 'silk' ? '0.5 mm extra-fine pins that will not snag fine cloth' : 'Heat-proof glass heads so they survive the iron',
       5,
+      true,
+      1,
+      'pack',
     ),
     tool('Tape measure', 'Flexible 150 cm tape measure', 3),
     tool(
@@ -269,26 +346,39 @@ export function buildBom(ctx: InstructionContext): BomItem[] {
           ? "Silk thread for tailor's tacks plus a chalk pencil for the wrong side (test first)"
           : 'Water-soluble marking pen or chalk pencil (test on a scrap)',
       4,
+      true,
+      1,
+      'pack',
     ),
-    tool('Seam ripper', 'For unpicking mistakes and opening buttonholes', 3),
+    tool('Seam ripper', closure === 'buttons' ? 'For unpicking mistakes and opening buttonholes' : 'For unpicking mistakes (everyone makes some)', 3),
     tool('Iron and ironing board', 'A steam iron with adjustable temperature', 30),
     tool(
       'Press cloth',
       m.fiber === 'silk' || m.fiber === 'wool' ? 'Silk organza press cloth (see-through, heat-resistant)' : 'Plain cotton press cloth (a clean tea towel works)',
       m.fiber === 'silk' || m.fiber === 'wool' ? 8 : 3,
     ),
-    tool('Machine needles', `${m.handling.needle} (pack of 5); start with a fresh needle`, 5),
-    tool('Hand-sewing needles', 'Assorted sharps for hems, tacks and buttons', 3),
+    tool('Machine needles', `${m.handling.needle} (pack of 5); start with a fresh needle`, 5, true, 1, 'pack'),
+    tool('Hand-sewing needles', `Assorted sharps for hems and tacks${closure === 'buttons' ? ' and buttons' : ''}`, 3, true, 1, 'pack'),
     tool('Clear tape and a long ruler', 'To assemble tiled pattern pages and check the test square', 6),
+    tool('Pattern weights', 'Or clean tins / heavy mugs: hold the paper pieces flat while you cut', 0, t.slippery || t.pinInAllowanceOnly),
+    tool('Seam roll', 'Or a tightly rolled towel: press seams open over it so the allowance edges do not mark the fabric', 0, false),
   );
   if (zip?.kind === 'invisible') items.push(tool('Invisible zip foot', 'Snap-on foot to fit your machine', 8));
   if (zip) items.push(tool('Zipper foot', 'Usually supplied with the machine', 6));
-  if (hasDarts || hasSleeves) items.push(tool("Tailor's ham", 'For pressing darts and sleeve caps into rounded shapes', 18, false));
+  if (hasDarts || hasSleeves)
+    items.push(tool("Tailor's ham", `For pressing ${[hasDarts ? 'darts' : null, hasSleeves ? 'sleeve caps' : null].filter(Boolean).join(' and ')} into rounded shapes`, 18, false));
   if (m.fiber === 'wool' || m.weightGsm >= 250) items.push(tool('Clapper', 'Hardwood block for flat, crisp seams on wool and linen', 15, false));
   if (closure === 'elastic') items.push(tool('Bodkin or large safety pin', 'To thread elastic through the casing', 2));
   if (closure === 'buttons') items.push(tool('Buttonhole foot', 'Usually supplied with the machine', 8, false));
-  if (t.slippery || t.knit || t.thick) items.push(tool('Rotary cutter, mat and pattern weights', 'Cuts slippery, stretchy or thick fabric without lifting it', 35, false));
-  if (hasFacings) items.push(tool('Point turner', 'Pushes out corners of ties, waistbands and facings', 3, false));
+  if (t.slippery || t.knit || t.thick) items.push(tool('Rotary cutter and mat', 'Cuts slippery, stretchy or thick fabric without lifting it', 35, false));
+  if (hasFacings) {
+    const what = [
+      ctx.pieces.some((p) => p.role === 'wrap-tie') ? 'ties' : null,
+      ctx.pieces.some((p) => p.role === 'waistband') ? 'waistbands' : null,
+      ctx.pieces.some((p) => /facing/.test(p.role)) ? 'facings' : null,
+    ].filter(Boolean);
+    items.push(tool('Point turner', `Pushes out the corners of ${what.join(' and ')}`, 3, false));
+  }
 
   return items;
 }

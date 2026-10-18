@@ -12,11 +12,12 @@ import { draftBallGown, draftBlockDress, draftPrincessDress, draftWrapDress } fr
 export type { DraftContext } from './context';
 export { buildPiece, edgePoints, edgeLength, cutInstruction } from './piece';
 export { STAGE } from './seams';
-import { STAGE } from './seams';
+import { STAGE, resolveSeamTypes } from './seams';
 
 export function draftGarment(ctx: DraftContext): { pieces: PatternPiece[]; seams: SeamSpec[]; silhouette: Silhouette } {
   const out = draftByType(ctx);
-  return { ...out, seams: withCentreSeams(out.pieces, out.seams) };
+  const seams = withCentreSeams(out.pieces, out.seams);
+  return { ...out, seams: resolveSeamTypes(out.pieces, seams, ctx.material) };
 }
 
 /**

@@ -17,7 +17,7 @@ import type { EdgeDraft, PieceDraft } from '../piece';
 import { dist, pathLength, pathBounds, splitAtLength, dedupe } from '../../geometry';
 import { bodyProfile, type BodyProfile } from '../../fit/profile';
 import { hpsHeight } from '../../measurements';
-import { SeamBook, standardZip } from '../seams';
+import { SeamBook, zipForOpening, zipOpening } from '../seams';
 
 export interface DraftResult {
   pieces: PatternPiece[];
@@ -103,10 +103,24 @@ export function pocketSplit(points: Path, topAtStart: boolean, fromTop: number, 
   ];
 }
 
-/** Zip length for a centre-back opening of `available` cm that must reach `needed` cm. */
-export function zipLength(needed: number, available: number): number {
-  const z = standardZip(Math.min(needed, available - 1.5));
-  return Math.min(z, Math.max(10, available - 1.5));
+/**
+ * Drafted zip opening (cm) for a seam of `available` cm that must open at
+ * least `needed` cm. The opening always matches a standard zip (see
+ * `zipOpening`); `zipFor` gives the zip to buy.
+ */
+export function zipLength(g: G, needed: number, available: number): number {
+  return zipOpening(needed, available - 1.5, g.zipType);
+}
+
+/** The standard zip (cm) for a drafted opening. */
+export function zipFor(g: G, openingCm: number): number {
+  return zipForOpening(openingCm, g.zipType);
+}
+
+/** "a 22 cm invisible zip (opening 20 cm)" */
+export function zipPhrase(g: G, openingCm: number): string {
+  const kind = g.zipType === 'zip-lapped' ? 'regular (lapped)' : 'invisible';
+  return `a ${zipFor(g, openingCm)} cm ${kind} zip (the opening is ${Math.round(openingCm * 10) / 10} cm)`;
 }
 
 /**
@@ -175,8 +189,28 @@ export function dartIntakeOn(piece: PatternPiece, edgeId: string): number {
     if (k === e.to) break;
     k = (k + 1) % n;
   }
-  const near = (q: { x: number; y: number }) => pts.some((p) => dist(p, q) < 0.05);
-  return piece.darts.filter((d) => near(d.legs[0]) && near(d.legs[1])).reduce((a, d) => a + d.intakeCm, 0);
+  const at = (q: { x: number; y: number }) => {
+    let best = -1;
+    let bd = 0.05;
+    pts.forEach((p, i) => {
+      const d = dist(p, q);
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    });
+    return best;
+  };
+  // The seam-line length between the legs (dart cap included) is what the
+  // sewn dart removes from the edge.
+  let total = 0;
+  for (const d of piece.darts) {
+    const i0 = at(d.legs[0]);
+    const i1 = at(d.legs[1]);
+    if (i0 < 0 || i1 < 0) continue;
+    total += pathLength(pts.slice(Math.min(i0, i1), Math.max(i0, i1) + 1));
+  }
+  return total;
 }
 
 export function pieceById(pieces: PatternPiece[], id: string): PatternPiece {

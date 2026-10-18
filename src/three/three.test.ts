@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { BufferGeometry } from 'three';
 import { resolveMeasurements, computeLandmarks } from '../core/measurements';
+import { design } from '../core/design';
+import { GARMENTS, MATERIALS, STYLES } from '../core/presets';
 import {
   BodyModel,
   buildBodyGeometry,
@@ -128,6 +130,21 @@ describe('garments', () => {
     expect(silk.waist).toBeLessThan(0.3);
   });
 
+  it('lets fluid fabric fall closer to the body than crisp fabric; a ball gown keeps its supported bell', () => {
+    const meanHemRadius = (src: Parameters<typeof planFigure>[0]) => {
+      const t = planFigure(src).tubes[0]!;
+      const row = t.radius.subarray((t.nS - 1) * t.cols, t.nS * t.cols);
+      return row.reduce((a, b) => a + b, 0) / row.length;
+    };
+    const soft = meanHemRadius(fixtureSource('circle-skirt', FIXTURE_MATERIALS.silk));
+    const crisp = meanHemRadius(fixtureSource('circle-skirt', FIXTURE_MATERIALS.taffeta));
+    expect(crisp).toBeGreaterThan(soft + 5);
+    const gown = fixtureSource('ball-gown', FIXTURE_MATERIALS.silk);
+    const loose = meanHemRadius(gown);
+    const supported = meanHemRadius({ ...gown, garment: { id: 'ball-gown', category: 'gown' } });
+    expect(supported).toBeGreaterThan(loose + 5);
+  });
+
   it('is deterministic', () => {
     const a = buildGarmentGeometry(fixtureSource('ball-gown', FIXTURE_MATERIALS.silk) as never);
     const b = buildGarmentGeometry(fixtureSource('ball-gown', FIXTURE_MATERIALS.silk) as never);
@@ -184,4 +201,19 @@ describe('scene and export', () => {
     expect(maxY).toBeGreaterThan(1.6);
     expect(maxY).toBeLessThan(1.7);
   });
+});
+
+describe('real design pipeline', () => {
+  it('every garment type yields valid, body-clearing meshes', () => {
+    const measurements = { heightCm: 166, bustCm: 94, waistCm: 76, hipCm: 102 };
+    for (const g of GARMENTS) {
+      const mat = MATERIALS.find((m) => m.suitableFor.includes(g.id)) ?? MATERIALS[0]!;
+      const style = STYLES.find((st) => st.recommendedGarments.includes(g.id)) ?? STYLES[0]!;
+      const pkg = design({ measurements, garment: g.id, styleId: style.id, materialId: mat.id });
+      const v = validateMeshes(pkg);
+      expect(v.issues, `${g.id} / ${mat.id}`).toEqual([]);
+      expect(v.stats.garmentVertices).toBeGreaterThan(0);
+    }
+    // Eleven full design pipelines: allow for a loaded CI machine running other test files in parallel.
+  }, 60_000);
 });

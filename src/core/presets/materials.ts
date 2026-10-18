@@ -520,7 +520,7 @@ export const MATERIALS: MaterialPreset[] = [
       cuttingTips: 'Cut with the greatest stretch going around the body, using weights and a rotary cutter.',
     },
     care: 'Machine wash 30 °C, line dry.',
-    suitableFor: ['pencil-skirt', 'sheath-dress', 'shift-dress', 'tapered-trousers', 'wrap-dress', 'column-gown', 'circle-skirt'],
+    suitableFor: ['pencil-skirt', 'sheath-dress', 'shift-dress', 'tapered-trousers', 'column-gown', 'circle-skirt'],
     occasions: ['everyday', 'work'],
     render: { baseColor: '#26272b', roughness: 0.7, sheen: 0.18 },
     pricePerMeterEur: [14, 26],

@@ -38,6 +38,8 @@ export interface SleeveInput {
   hemCirc: number;
   /** Distance from cap top to the elbow (for a notch on long sleeves). */
   elbowFromTop?: number;
+  /** Highest cap as a fraction of the armhole depth (knits use a low, wide cap). Default 0.95. */
+  maxCapHeightFrac?: number;
 }
 
 export interface SleeveDraft {
@@ -72,7 +74,7 @@ export function draftSleeve(inp: SleeveInput): SleeveDraft {
     return pathLength(c.front) + pathLength(c.back);
   };
   const lo = 0.3 * inp.armholeDepth;
-  const hi = 0.95 * inp.armholeDepth;
+  const hi = Math.max(lo + 0.5, (inp.maxCapHeightFrac ?? 0.95) * inp.armholeDepth);
   let h: number;
   if (capLen(hi) < target) {
     h = hi;

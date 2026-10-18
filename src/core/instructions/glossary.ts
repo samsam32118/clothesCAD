@@ -80,6 +80,20 @@ const ENTRIES: GlossaryEntry[] = [
   { term: 'muslin', definition: 'A quick practice version of the garment in cheap cotton (also called a toile) to check fit before cutting precious fabric.', forms: ['toile'] },
   { term: 'hook and eye', definition: 'A small metal hook and loop sewn above a zip to hold the top edges neatly together.', forms: ['hook & eye'] },
   { term: 'bodkin', definition: 'A blunt, large-eyed needle (or a safety pin) used to thread elastic through a casing.' },
+  { term: 'stitch in the ditch', definition: 'Stitching from the right side exactly in the groove of an existing seam, so the stitches sink out of sight while catching a folded edge (e.g. the inside of a waistband) underneath.', forms: ['stitching in the ditch', 'in the ditch'] },
+  { term: 'presser foot', definition: 'The metal foot that holds the fabric flat against the feed dogs while the machine sews. Lift it with the lever behind the needle to turn or remove the fabric.' },
+  { term: 'needle plate', definition: 'The metal plate under the presser foot with engraved lines that show the distance from the needle; line the raw edge up with the line for your seam allowance.' },
+  { term: 'zip coil', definition: 'The row of plastic or metal teeth that interlock when the zip is closed.', forms: ['coil', 'coils', 'zip teeth'] },
+  { term: 'zip slider', definition: 'The part with the pull tab that runs along the coil to open and close the zip.', forms: ['slider'] },
+  { term: 'dart point', definition: 'The tip of a dart, where the stitching tapers to nothing. Never backstitch there: tie the threads instead.' },
+  { term: 'dart legs', definition: 'The two stitching lines of a dart that meet at the dart point; they start at the two snips on the raw edge.', forms: ['dart leg'] },
+  { term: 'seam roll', definition: 'A firm, sausage-shaped cushion for pressing seams open so the allowance edges do not leave marks on the right side. A tightly rolled towel works too.' },
+  { term: 'box pleat', definition: 'Two folds turned towards each other so they meet in the middle; it takes in fullness at a waist and opens out below it.', forms: ['box pleats', 'box-pleated'] },
+  { term: 'waist stay', definition: 'A strip of firm petersham ribbon fastened round the waist inside a gown; it carries the weight of the skirt so the bodice and zip are not strained.' },
+  { term: 'boning', definition: 'Flexible strips (spiral steel or polyester) slipped into narrow channels along bodice seams so the bodice stays smooth and up without straps.' },
+  { term: 'horsehair braid', definition: 'A stiff, open-weave tape sewn into the hem of a full skirt so the hem stands away from the body and holds its shape.' },
+  { term: 'stay tape', definition: 'A narrow, firm tape stitched along an edge that would otherwise stretch (bias edges, wrap fronts); on knits clear elastic does the same job.', forms: ['clear elastic'] },
+  { term: 'petersham', definition: 'A firm, ribbed ribbon that can be shaped with the iron; used for waist stays and waistband facings.' },
   { term: 'pattern weights', definition: 'Small heavy objects that hold the paper pattern flat on the fabric instead of pins; tins of food work well.' },
 ];
 
@@ -91,7 +105,6 @@ const CORE_TERMS = [
   'wrong side',
   'selvedge',
   'grainline',
-  'bias',
   'fold line',
   'seam allowance',
   'hem allowance',
@@ -105,7 +118,6 @@ const CORE_TERMS = [
   'seam finish',
   'zigzag',
   'trim',
-  'clip',
   'ease',
   'raw edge',
   'pre-wash',
@@ -114,7 +126,7 @@ const CORE_TERMS = [
   'bobbin',
   'seam ripper',
   'tension',
-  'muslin',
+  'presser foot',
 ];
 
 function escapeRegExp(s: string): string {

@@ -116,7 +116,7 @@ export function categoryOf(g: GarmentDefinition): GarmentCategory {
 }
 
 /** Hem height (cm from floor) for a length preset, before calf/knee avoidance. */
-export function presetHemHeight(length: LengthPreset, category: GarmentCategory, L: BodyLandmarks, heightCm: number): number {
+export function presetHemHeight(length: LengthPreset, category: GarmentCategory, L: BodyLandmarks, heightCm: number, shoeHeelCm = 0): number {
   const petite = heightCm < 158;
   switch (length) {
     case 'mini':
@@ -130,8 +130,51 @@ export function presetHemHeight(length: LengthPreset, category: GarmentCategory,
     case 'ankle':
       return category === 'trousers' ? L.ankle + 1.5 : L.ankle + 4;
     case 'floor':
-      return category === 'trousers' ? 2 : 1;
+      // Clear the floor IN the intended shoes: the body (and the hem) rise by
+      // the heel height, so barefoot the hem sits that much lower.
+      return floorClearance(category) - shoeHeelCm;
   }
+}
+
+/** Extra room (cm) over the bust a garment needs to slip over it without an opening. */
+export const SHELL_PASS_EASE = 3;
+
+/** Shell tops in light wovens: skimming, pulled over the bust, short neck zip only. */
+export function isLightShell(garment: Pick<GarmentDefinition, 'id'>, material: Pick<MaterialPreset, 'construction' | 'weightGsm'>): boolean {
+  return garment.id === 'shell-top' && material.construction === 'woven' && material.weightGsm < 100;
+}
+
+/** Gap (cm) between a floor-length hem and the floor, wearing the intended shoes. */
+export function floorClearance(category: GarmentCategory): number {
+  return category === 'trousers' ? 1.5 : 1;
+}
+
+/** Upper bounds for a woven gown bodice's ease (cm). */
+export const GOWN_BODICE_EASE = { bust: 5, waist: 2 } as const;
+
+/** Heel height the hem is planned for: the request's, else 7 cm for gowns and evening/runway, 2 cm otherwise. */
+export function shoeHeelFor(request: Pick<DesignRequest, 'shoeHeelCm' | 'occasion'>, garment: Pick<GarmentDefinition, 'category'>): number {
+  const h = request.shoeHeelCm;
+  if (h !== undefined && Number.isFinite(h)) return Math.min(15, Math.max(0, h));
+  if (garment.category === 'gown' || request.occasion === 'evening' || request.occasion === 'runway') return 7;
+  return 2;
+}
+
+/**
+ * Knit stretch (%) from which a garment is drafted on the knit block: no
+ * darts (the fabric's stretch shapes it), a low sleeve cap and near-zero ease.
+ */
+export const KNIT_BLOCK_STRETCH_PCT = 20;
+
+/** Base ease of the knit block before the stretch allowance is taken off (cm). */
+const KNIT_BASE_EASE: Record<FitPreference, EaseRow> = {
+  fitted: { bust: 2, waist: 2, hip: 2, upperArm: 2, thigh: 3 },
+  regular: { bust: 4, waist: 4, hip: 4, upperArm: 3, thigh: 5 },
+  relaxed: { bust: 8, waist: 8, hip: 7, upperArm: 5, thigh: 9 },
+};
+
+function isLowerCat(cat: GarmentCategory): boolean {
+  return cat === 'skirt' || cat === 'trousers';
 }
 
 /**
@@ -171,9 +214,19 @@ export function circleFraction(flare: number): number {
   return 0.5;
 }
 
-/** Ball-gown waist gathering ratio (fabric waist / bodice waist). */
+/**
+ * Ball-gown waist fullness ratio (skirt waist / bodice waist). The skirt is
+ * made of flared gores, so the fullness at the hem comes from the gores and
+ * only a modest 1.25–1.5× is gathered or pleated into the waist (more bulk
+ * there would thicken the waist of the very figure the gown should define).
+ */
 export function ballGownGatherRatio(flare: number): number {
-  return 1.8 + 1.0 * flare;
+  return 1.25 + 0.25 * Math.min(1, Math.max(0, flare));
+}
+
+/** Structured (crisp) silks are box-pleated into the waist; softer fabrics are gathered. */
+export function ballGownWaistTreatment(material: Pick<MaterialPreset, 'stiffness'>): 'pleats' | 'gathers' {
+  return material.stiffness >= 0.6 ? 'pleats' : 'gathers';
 }
 
 export function planFit(ctx: FitContext): FitPlan {
@@ -193,7 +246,10 @@ export function planFit(ctx: FitContext): FitPlan {
   let fit: FitPreference = garment.defaults.fit;
   const styleFit = FIT_DEFINED.includes(garment.id) ? shiftFit(garment.defaults.fit, style.silhouette.defaultFit) : style.silhouette.defaultFit;
   fit = styleFit;
-  const styleLengths = style.silhouette.preferredLengths.filter((l) => allowed.length.includes(l));
+  // A style's preferred lengths describe its skirts and dresses; trousers keep
+  // their own cut (a floor-length wide leg must not become a cropped culotte).
+  const styleLengths =
+    cat === 'skirt' || cat === 'dress' || cat === 'gown' ? style.silhouette.preferredLengths.filter((l) => allowed.length.includes(l)) : [];
   if (styleLengths.length) {
     // among the style's preferred lengths prefer one that suits this height
     const petite = r.heightCm < 158;
@@ -260,14 +316,18 @@ export function planFit(ctx: FitContext): FitPlan {
   }
 
   // ------------------------------------------------------------------ ease
-  const base = WOVEN_EASE[cat][fit];
+  const base = KNIT_BLOCK_STRETCH_PCT <= material.stretchPct && knit ? KNIT_BASE_EASE[fit] : WOVEN_EASE[cat][fit];
   const mod = style.silhouette.easeModifierCm;
   const lowerOnly = cat === 'skirt' || cat === 'trousers';
+  // A gown bodice carries the weight of the skirt: it must stay close, so a
+  // style's relaxed room only goes into the skirt (closer styles still apply).
+  const gown = cat === 'gown';
+  const bodiceMod = gown ? Math.min(0, mod) : mod;
   const ease: EaseRow = {
-    bust: base.bust + mod,
-    waist: base.waist + mod * (lowerOnly ? 0.25 : 0.5),
+    bust: base.bust + bodiceMod,
+    waist: base.waist + bodiceMod * (lowerOnly ? 0.25 : 0.5),
     hip: base.hip + mod,
-    upperArm: base.upperArm + mod * 0.5,
+    upperArm: base.upperArm + bodiceMod * 0.5,
     thigh: base.thigh + mod,
   };
   if (knit) {
@@ -300,6 +360,15 @@ export function planFit(ctx: FitContext): FitPlan {
     // Must be able to sit: woven hip ease never below 4 cm on hip-hugging shapes.
     if (!knit && ease.hip < 4) ease.hip = 4;
   }
+  if (gown && !knit) {
+    // Couture gown bodice: 2.5–5 cm at the bust and 0–2 cm at the waist, so the
+    // waist seam sits on the body and holds the skirt up (with a waist stay).
+    ease.bust = Math.min(GOWN_BODICE_EASE.bust, Math.max(2.5, ease.bust));
+    ease.waist = Math.min(GOWN_BODICE_EASE.waist, ease.waist);
+    rationale.push(
+      `A gown bodice carries the weight of the skirt, so it is fitted close: bust +${fmt(ease.bust)} cm, waist +${fmt(ease.waist)} cm. A petersham waist stay and boning keep it from sliding down.`,
+    );
+  }
 
   // ------------------------------------------------------------- finished
   const bustF = r.bustCm + ease.bust;
@@ -319,6 +388,14 @@ export function planFit(ctx: FitContext): FitPlan {
     if (waistF < minWaist) {
       waistF = minWaist;
       rationale.push(`The shell is shaped only at the side seams, so its waist (${fmt(waistF)} cm) skims your waist rather than fitting it closely; tuck it in or wear it loose.`);
+    }
+    if (isLightShell(garment, material) && waistF < r.bustCm + SHELL_PASS_EASE) {
+      // A long zip puckers a fine silk; a skimming shell slips over the bust and
+      // needs only a short zip at the back neck to pass the head.
+      waistF = r.bustCm + SHELL_PASS_EASE;
+      rationale.push(
+        `${material.name} is fine and fluid, so the shell skims straight down (waist ${fmt(waistF)} cm) and slips over your bust: it needs only a short zip at the back neck, because a long zip would pucker such a light fabric.`,
+      );
     }
   }
   if (cat === 'skirt' || cat === 'trousers') {
@@ -365,19 +442,20 @@ export function planFit(ctx: FitContext): FitPlan {
 
   // ---------------------------------------------------------------- length
   const hps = hpsHeight(r);
+  const heel = shoeHeelFor(request, garment);
   let hemH: number;
   if (cat === 'top') {
     hemH = topHemHeight(body.shape, L);
     rationale.push(topHemReason(body.shape, hemH));
   } else {
-    hemH = presetHemHeight(opts.length, cat, L, r.heightCm);
+    hemH = presetHemHeight(opts.length, cat, L, r.heightCm, heel);
     const [z0, z1] = calfAvoidZone(L);
     if (cat !== 'trousers' && hemH > z0 && hemH < z1) {
       const below = z0 - 0.5;
       const above = L.knee - 0.012 * r.heightCm;
       hemH = opts.length === 'midi' || opts.length === 'ankle' ? below : Math.max(above, z1 + 0.5);
     }
-    rationale.push(hemReason(opts.length, cat, hemH, L, r.heightCm));
+    rationale.push(hemReason(opts.length, cat, hemH, L, r.heightCm, heel));
   }
   hemH = r1(hemH);
 
@@ -412,6 +490,7 @@ export function planFit(ctx: FitContext): FitPlan {
     }
     case 'shell-top':
       hem = Math.max(profile.torsoAt(hemH) + Math.max(ease.hip, 3), bustF - 6) + 10 * opts.flare;
+      if (isLightShell(garment, material)) hem = Math.max(hem, r.bustCm + SHELL_PASS_EASE);
       break;
     case 'shift-dress':
       hem = Math.max(bustF, hipF) + belowHip * 0.35 * opts.flare + 2;
@@ -449,8 +528,10 @@ export function planFit(ctx: FitContext): FitPlan {
   }
   rationale.push(easeReason(garment, fit, ease, r, knit));
   if (cat === 'skirt' || cat === 'dress' || cat === 'gown') {
-    if (opts.flare > 0.05 && garment.id !== 'pencil-skirt' && garment.id !== 'sheath-dress') {
-      rationale.push(flareReason(garment.id, opts.flare, body.shape, hem ?? 0, hipF));
+    if (garment.id === 'pencil-skirt' || garment.id === 'sheath-dress') {
+      rationale.push(straightReason(garment.id, body.shape, hem ?? 0, hipF));
+    } else if (opts.flare > 0.05) {
+      rationale.push(flareReason(garment.id, opts.flare, body.shape, hem ?? 0, hipF, ballGownWaistTreatment(material)));
     }
   }
   if (garment.id === 'wrap-dress') {
@@ -464,8 +545,11 @@ export function planFit(ctx: FitContext): FitPlan {
     );
   }
   if (style.silhouette.easeModifierCm !== 0) {
+    const m = style.silhouette.easeModifierCm;
     rationale.push(
-      `${style.name} styling ${style.silhouette.easeModifierCm > 0 ? `adds ${fmt(style.silhouette.easeModifierCm)} cm of relaxed room` : `takes ${fmt(-style.silhouette.easeModifierCm)} cm for a closer, sharper line`} at bust and hip.`,
+      gown && m > 0
+        ? `${style.name} styling adds ${fmt(m)} cm of relaxed room to the skirt only; the bodice stays close-fitting so it can carry the skirt.`
+        : `${style.name} styling ${m > 0 ? `adds ${fmt(m)} cm of relaxed room` : `takes ${fmt(-m)} cm for a closer, sharper line`} at ${isLowerCat(cat) ? 'waist and hip' : 'bust and hip'}.`,
     );
   }
 
@@ -493,6 +577,7 @@ export function planFit(ctx: FitContext): FitPlan {
     },
     finished,
     hemHeightFromFloorCm: hemH,
+    shoeHeelCm: heel,
     rationale,
   };
 }
@@ -547,10 +632,13 @@ function topHemReason(shape: BodyShape, h: number): string {
   }
 }
 
-function hemReason(length: LengthPreset, cat: GarmentCategory, h: number, L: BodyLandmarks, height: number): string {
+function hemReason(length: LengthPreset, cat: GarmentCategory, h: number, L: BodyLandmarks, height: number, heel: number): string {
   const at = `${fmt(h)} cm from the floor`;
+  const inShoes = fmt(h + heel);
+  const shoes = heel > 0.5 ? `${fmt(heel)} cm heels` : 'flat shoes';
   if (cat === 'trousers') {
-    if (length === 'floor') return `Full length: the hem ends ${at}, just clearing the floor barefoot; with heels the leg line looks longest. Hem the trousers wearing the shoes you plan to wear.`;
+    if (length === 'floor')
+      return `Full length, drafted for ${shoes}: in them the hem ends ${inShoes} cm from the floor and the leg line runs unbroken to the ground, which makes the legs look longest. Barefoot the hem ${h < 0 ? 'rests on the floor' : `is ${fmt(h)} cm from the floor`}. Wear these shoes when you pin the hem.`;
     if (length === 'ankle') return `Ankle length: the hem ends ${at}, right at the ankle bone, showing the slimmest part of the leg.`;
     return `Cropped length: the hem ends ${at}, below the fullest part of the calf.`;
   }
@@ -568,7 +656,7 @@ function hemReason(length: LengthPreset, cat: GarmentCategory, h: number, L: Bod
     case 'ankle':
       return `Ankle-length hem at ${at}, just above the ankle bone, so the narrowest part of the leg shows and you can walk freely.`;
     case 'floor':
-      return `Floor-length hem at ${at} barefoot. If you will wear heels, the line still reaches the floor; hem it wearing the exact shoes so it just kisses the floor.`;
+      return `Floor-length hem drafted for ${shoes}: in them it clears the floor by ${inShoes} cm, so you can walk without treading on it. Heels lift the hem by their height, so barefoot it ${h < 0 ? `lies ${fmt(-h)} cm on the floor` : `sits ${fmt(h)} cm from the floor`}. Pin the hem wearing these exact shoes.`;
   }
 }
 
@@ -605,7 +693,25 @@ function easeReason(g: GarmentDefinition, fit: FitPreference, e: EaseRow, r: Res
   return `Ease (${fit}${knit ? ', knit' : ''}): ${parts.join(', ')} for ${why}. Based on your bust ${fmt(r.bustCm)} / waist ${fmt(r.waistCm)} / hip ${fmt(r.hipCm)} cm.`;
 }
 
-function flareReason(id: GarmentType, flare: number, shape: BodyShape, hem: number, hipF: number): string {
+/** Why a straight, close-fitting cut (pencil skirt, sheath) suits this body shape. */
+function straightReason(id: GarmentType, shape: BodyShape, hem: number, hipF: number): string {
+  const shapeWhy: Record<BodyShape, string> = {
+    pear: 'the shaped waist and straight drop from the hip keep the line clean instead of adding width, especially in a darker or matte fabric',
+    'inverted-triangle': 'the close line through hip and thigh keeps the lower half streamlined; pair it with a soft, simple top so the shoulders are not emphasised further',
+    hourglass: 'it follows the curve from waist to hip, the shape this cut was made for',
+    rectangle: 'the waist is taken in more than the hip, so the cut itself creates a gentle waist-to-hip curve',
+    round: 'the straight, unbroken column from waist to hem draws the eye down the length rather than across, and the walking ease keeps it from pulling',
+  };
+  const garmentName = id === 'pencil-skirt' ? 'pencil skirt' : 'sheath';
+  const taper = hipF - hem;
+  const line =
+    taper > 0.5
+      ? `narrows by ${fmt(taper)} cm from hip to hem`
+      : 'falls straight from the hip to the hem';
+  return `Silhouette: the ${garmentName} ${line} (hem ${fmt(hem)} cm around), so ${shapeWhy[shape]}.`;
+}
+
+function flareReason(id: GarmentType, flare: number, shape: BodyShape, hem: number, hipF: number, treatment: 'pleats' | 'gathers'): string {
   const amount = flare < 0.3 ? 'a gentle' : flare < 0.7 ? 'a moderate' : 'a generous';
   const shapeWhy: Record<BodyShape, string> = {
     pear: 'it glides over the hip instead of clinging to it',
@@ -619,7 +725,7 @@ function flareReason(id: GarmentType, flare: number, shape: BodyShape, hem: numb
     return `${f === 1 ? 'Full' : f === 0.75 ? 'Three-quarter' : 'Half'} circle cut: the ${fmt(hem)} cm hem swirls as you move; ${shapeWhy[shape]}.`;
   }
   if (id === 'ball-gown') {
-    return `The skirt is gathered ${fmt(ballGownGatherRatio(flare))}× into the waist and spreads to a ${fmt(hem / 100)} m hem, so the fitted bodice makes your waist look smaller by contrast.`;
+    return `The skirt is cut in flared gores, ${treatment === 'pleats' ? 'box-pleated' : 'gathered'} only ${fmt(ballGownGatherRatio(flare))}× into the waist so the waist stays slim, and spreads to a ${fmt(hem / 100)} m hem over a petticoat, so the fitted bodice makes your waist look smaller by contrast.`;
   }
   return `${amount[0].toUpperCase()}${amount.slice(1)} flare: the hem measures ${fmt(hem)} cm against ${fmt(hipF)} cm at the hip, so ${shapeWhy[shape]}.`;
 }

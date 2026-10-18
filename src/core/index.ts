@@ -3,7 +3,8 @@ export { design } from './design';
 export { resolveMeasurements, validateMeasurements, computeLandmarks } from './measurements';
 export { analyzeBody } from './fit/analyze';
 export { planFit } from './fit/plan';
-export { layoutPieces } from './layout';
+export { isOneWayFabric, layoutPieces } from './layout';
+export type { LayoutOptions } from './layout';
 export {
   renderPieceSVG,
   renderPatternSheetSVG,

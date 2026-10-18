@@ -10,7 +10,7 @@ import { stripPiece, pocketBag, type StripSegment } from '../parts';
 import { STAGE } from '../seams';
 import { buildSilhouette } from '../silhouette';
 import { pathLength, splitAtLength } from '../../geometry';
-import { addDartSeams, addHem, dartIntakeOn, edgeLen, fitFolds, hasEdge, makeG, pieceById, pocketSplit, zipLength, type DraftResult } from './common';
+import { addDartSeams, addHem, dartIntakeOn, edgeLen, fitFolds, hasEdge, makeG, pieceById, pocketSplit, zipLength, zipPhrase, type DraftResult } from './common';
 
 const WAISTBAND_W = 3.5;
 
@@ -46,7 +46,7 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
   const ha = g.ha;
   const pockets = opts.pockets;
   const crotchTotalBack = pathLength(block.back.crotch);
-  const zipLen = g.zip ? zipLength(18, Math.min(22, crotchTotalBack - 6)) : 0;
+  const zipLen = g.zip ? zipLength(g, 18, Math.min(23.5, crotchTotalBack - 4.5)) : 0;
 
   // front edges (clockwise): waist, crotch, inseam, hem, side (hem -> waist)
   const frontSide: EdgeDraft[] = pockets
@@ -155,14 +155,14 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
   B.join('inseam', ['front-leg', 'inseam'], ['back-leg', 'inseam'], STAGE.inseam, { note: 'Match the crotch points first, then the hems.' });
   B.join('front-crotch', ['front-leg', 'crotch'], ['front-leg', 'crotch'], STAGE.crotch, { note: 'Join the two front legs at the centre front. Stitch the curve twice for strength; clip the curve.' });
   B.join('back-crotch', ['back-leg', 'crotch'], ['back-leg', 'crotch'], STAGE.crotch + 1, { note: 'Turn one leg right side out and slip it inside the other; stitch the crotch from the zip to the front, matching the inseams.' });
-  if (zipLen > 0) B.join('cb-zip', ['back-leg', 'cb-zip'], ['back-leg', 'cb-zip'], STAGE.zip, { type: g.zipType, note: `Use a ${zipLen} cm ${g.closure === 'lapped-zip' ? 'regular' : 'invisible'} zip in the centre-back seam.` });
+  if (zipLen > 0) B.join('cb-zip', ['back-leg', 'cb-zip'], ['back-leg', 'cb-zip'], STAGE.zip, { type: g.zipType, note: `Use ${zipPhrase(g, zipLen)} in the centre-back seam.` });
   for (const s of segs) {
     const m = /^join-(.+)-([12])$/.exec(s.edgeId);
     if (!m) continue;
     const ease = dartIntakeOn(pieceById(pieces, m[1]), 'waist');
     B.join(`waistband-${m[1]}-${m[2]}`, [m[1], 'waist'], ['waistband', s.edgeId], STAGE.waistband, {
       ease,
-      note: ease > 0 ? `Includes ${ease.toFixed(1)} cm of dart intake; sew the darts first.` : undefined,
+      note: ease > 0 ? `The flat edge includes ${ease.toFixed(1)} cm of dart; with the darts sewn the edges match.` : undefined,
     });
   }
   if (elastic) {
@@ -172,7 +172,7 @@ export function draftTrouserGarment(ctx: DraftContext): DraftResult {
     B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, 'Stitch across both ends of the folded waistband, trim and turn.');
     B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, 'Stitch across the other end the same way.');
     if (hasEdge(pieces, 'waistband', 'ext-end')) B.single('waistband-underlap', ['waistband', 'ext-end'], 'plain', STAGE.waistbandFinish, 'The 3 cm extension is the underlap behind the zip: stitch its lower edge closed when you stitch the end, then sew the hook or button on it.');
-    B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Turn the inner edge under and stitch in the ditch from the right side. Add a hook and bar (or button) at the top of the zip.');
+    B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Turn the inner edge under and stitch in the ditch from the right side.');
   }
   addHem(g, 'front-leg', 'hem', false, ha, STAGE.hems, 'Hem both legs at the same time; try on with your shoes first.');
   addHem(g, 'back-leg', 'hem', false, ha, STAGE.hems);

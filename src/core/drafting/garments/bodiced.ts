@@ -16,10 +16,10 @@ import { bodiceFrame, blockHalves, princessPanels, type BodiceFrame, type Bodice
 import { draftSkirtBlock, flareToHem } from '../blocks/skirt';
 import { draftSleeve, type ArmholeSegment } from '../blocks/sleeve';
 import { edgeFacing, pocketBag, stripPiece, tiePiece, type StripSegment } from '../parts';
-import { STAGE } from '../seams';
+import { STAGE, ZIP_END_ALLOWANCE_CM } from '../seams';
 import { buildSilhouette, type Knot } from '../silhouette';
-import { arc, cubicBezier, dedupe, lerp, pathLength, sub, normalize, add, scale } from '../../geometry';
-import { ballGownGatherRatio, strideHemNeeded } from '../../fit/plan';
+import { arc, cubicBezier, dedupe, lerp, pathLength, rotatePath, sub, normalize, add, scale } from '../../geometry';
+import { ballGownGatherRatio, ballGownWaistTreatment, KNIT_BLOCK_STRETCH_PCT, strideHemNeeded } from '../../fit/plan';
 import { headCircumference } from '../../measurements';
 import {
   addDartSeams,
@@ -33,12 +33,21 @@ import {
   pieceById,
   pocketSplit,
   zipLength,
+  zipFor,
+  zipPhrase,
   fitFolds,
   type DraftResult,
   type G,
 } from './common';
 
 const POCKET_OPENING = 16;
+/** Gown structure notions (named once so the drafting notes and the bill of materials agree). */
+export const GOWN_WAIST_STAY = '2.5 cm petersham ribbon';
+export const GOWN_BONING = '1 cm spiral-steel or polyester (rigilene-type) boning';
+export const GOWN_HORSEHAIR = '5 cm horsehair braid';
+/** Tape that stabilises the bias wrap edge (wovens: stay tape; knits: clear elastic). */
+export const WRAP_STAY_TAPE = '6 mm stay tape (clear elastic on knits)';
+const WRAP_STAY_SHORTEN_CM = 1.5;
 /** Gown side seams get a wide allowance so they can be let out at the fitting. */
 const GOWN_SIDE_SA = 2.5;
 
@@ -56,6 +65,8 @@ interface Ctx {
   sleeveless: boolean;
   lined: boolean;
   pullOn: boolean;
+  /** Stretch knit drafted on the dartless knit block. */
+  knitBlock: boolean;
   type: DraftContext['garment']['id'];
 }
 
@@ -72,6 +83,7 @@ function makeCtx(ctx: DraftContext): Ctx {
     sleeveless: fit.options.sleeve === 'none',
     lined: fit.options.lining && !g.knit,
     pullOn: g.closure === 'none',
+    knitBlock: g.knit && g.material.stretchPct >= KNIT_BLOCK_STRETCH_PCT,
     type: ctx.garment.id,
   };
 }
@@ -90,6 +102,7 @@ function frameFor(c: Ctx, lower: Omit<LowerInput, 'hipF' | 'highHipF' | 'hipDept
     neckline: g.fit.options.neckline,
     minNeckOpening: c.pullOn ? headCircumference(r.heightCm) + (g.knit ? 0 : 4) : undefined,
     waistDarts,
+    knitBlock: c.knitBlock,
     lower: lower
       ? {
           hipF: c.hipF,
@@ -111,7 +124,7 @@ function capEaseFor(c: Ctx): number {
   const m = c.g.material;
   if (c.g.knit) return 0.3;
   const base = { fitted: 3.2, regular: 2.8, relaxed: 2.2 }[c.g.fit.fit];
-  return Math.max(1.5, Math.min(4, base - 1.2 * m.stiffness + 0.4));
+  return Math.max(2, Math.min(4, base - 1.2 * m.stiffness + 0.4));
 }
 
 function sleeveHem(c: Ctx, upperArmF: number): number {
@@ -144,6 +157,8 @@ function sleevePiece(c: Ctx, f: BodiceFrame, segments: ArmholeSegment[]): { draf
     length: g.fit.finished.sleeveLength ?? 0.3 * g.r.armLengthCm,
     hemCirc: sleeveHem(c, upperArmF),
     elbowFromTop: g.fit.options.sleeve === 'long' || g.fit.options.sleeve === 'three-quarter' ? elbowFromTop : undefined,
+    // knit block: low, wide cap (the knit stretches over the shoulder)
+    maxCapHeightFrac: c.knitBlock ? 0.6 : undefined,
   });
   const edges: EdgeDraft[] = [
     ...s.capSections.map((x) => ({ id: x.id, kind: 'seam' as const, points: x.points })),
@@ -185,6 +200,24 @@ function addSleeveSeams(c: Ctx, sections: ReturnType<typeof draftSleeve>['capSec
   addHem(c.g, 'sleeve', 'hem', false, Math.min(c.g.ha, 2.5), STAGE.hems);
 }
 
+/** Seam allowance used on both sides of a binding join (the binding encloses it). */
+function bindingAllowance(c: Ctx): number {
+  return Math.min(c.g.sa, 1);
+}
+
+/**
+ * Give garment edges that will be bound the binding's own seam allowance, so
+ * the raw edges line up when the binding is sewn on. Must run on the drafts,
+ * before the pieces are built.
+ */
+function useBindingAllowance(c: Ctx, drafts: PieceDraft[], refs: ReadonlyArray<{ pieceId: string; edgeId: string }>): void {
+  const a = bindingAllowance(c);
+  for (const d of drafts) {
+    const ids = new Set(refs.filter((r) => r.pieceId === d.id).map((r) => r.edgeId));
+    if (ids.size) d.edges = d.edges.map((e) => (ids.has(e.id) ? { ...e, allowance: a } : e));
+  }
+}
+
 /** Binding strip with one segment per garment edge. */
 function bindingPiece(c: Ctx, id: string, name: string, built: PatternPiece[], parts: Array<{ pieceId: string; edgeId: string; seg: string; label?: string }>, cutCount: number): PieceDraft {
   const knit = c.g.knit;
@@ -199,7 +232,7 @@ function bindingPiece(c: Ctx, id: string, name: string, built: PatternPiece[], p
     width: 1,
     folded: true,
     grain: knit ? 'crosswise' : 'bias',
-    seamAllowanceCm: Math.min(c.g.sa, 1),
+    seamAllowanceCm: bindingAllowance(c),
     cutCount,
     notes: [knit ? 'Cut across the grain (stretch runs along the strip)' : 'Bias strip: cut at 45° to the selvedge'],
   });
@@ -301,7 +334,13 @@ export function draftBlockDress(ctx: DraftContext): DraftResult {
   const main = buildHalves(c.belowWaist);
   const f = main.f;
   const cbLen = pathLength(main.back.center);
-  const zipLen = g.zip ? zipLength(Math.max(35, f.backWaistY - f.neckB[0].y + 18), cbLen) : 0;
+  // Opening the zip must give: if the body of the garment already slips over
+  // the bust (skimming shells), only the head has to pass the neck, so a short
+  // neck zip is enough; otherwise it runs past the waist.
+  const passes = Math.min(c.waistF, c.hemF) >= r.bustCm + 2 && (c.hemF >= r.hipCm + 2 || L.hip < fit.hemHeightFromFloorCm);
+  const headNeed = Math.max(16, (headCircumference(r.heightCm) + 4 - (r.neckCm + 4)) / 2 + 3);
+  const zipNeed = isShell && passes ? headNeed : isShell ? f.backWaistY - f.neckB[0].y + 5 : Math.max(35, f.backWaistY - f.neckB[0].y + 18);
+  const zipLen = g.zip ? zipLength(g, zipNeed, cbLen) : 0;
 
   const halfDrafts = (h: { front: BodiceHalf; back: BodiceHalf }, isLining: boolean): PieceDraft[] => {
     const sfx = isLining ? '-lining' : '';
@@ -399,6 +438,8 @@ export function draftBlockDress(ctx: DraftContext): DraftResult {
     const pe = drafts[0].edges.find((e) => e.id === 'side-pocket');
     if (pe) drafts.push(pocketBag({ id: 'pocket-bag', name: 'Pocket bag', layer: c.lined ? 'lining' : 'self', attach: pe.points, interiorRight: false, seamAllowanceCm: g.sa }));
   }
+  if (c.sleeveless && !c.lined) useBindingAllowance(c, drafts, [{ pieceId: 'front', edgeId: 'armhole' }, { pieceId: 'back', edgeId: 'armhole' }]);
+  if (g.knit && !c.lined) useBindingAllowance(c, drafts, neckBindingParts());
   let built = fitFolds(g, drafts).map(buildPiece);
   let sleeveSections: ReturnType<typeof draftSleeve>['capSections'] = [];
   const more: PieceDraft[] = [];
@@ -486,7 +527,7 @@ function addCentreBackSeams(c: Ctx, pieces: PatternPiece[], backId: string, zipL
   if (hasEdge(pieces, backId, 'cb-zip')) {
     B.join(`${backId}-cb-zip`, [backId, 'cb-zip'], [backId, 'cb-zip'], STAGE.zip, {
       type: c.g.zipType,
-      note: `Use a ${zipLen} cm ${c.g.closure === 'lapped-zip' ? 'regular (lapped)' : 'invisible'} zip; the top stop sits 1 cm below the neckline seam line.${extraNote ? ' ' + extraNote : ''}`,
+      note: `Use ${zipPhrase(c.g, zipLen)}; the top stop sits 1 cm below the neckline seam line.${extraNote ? ' ' + extraNote : ''}`,
       finish: 'Finish both centre-back edges before inserting the zip.',
     });
   }
@@ -586,13 +627,14 @@ export function draftPrincessDress(ctx: DraftContext): DraftResult {
 
   const make = (belowWaist: number) => {
     const f = frameFor(c, { belowWaist, hemF: hemForFrame, princessFlare }, true);
-    return { f, p: princessPanels(f) };
+    // a centre-back seam (zip) is shaped 1.2 cm in at the waist for the sway of the back
+    return { f, p: princessPanels(f, { cbShapingCm: fold ? 0 : 1.2 }) };
   };
   const main = make(c.belowWaist);
   const f = main.f;
   const cbPath = main.p.centreBack.edges.find((e) => e.id === 'cb')!.points;
   const cbLen = pathLength(cbPath);
-  const zipLen = g.zip ? zipLength(Math.max(40, f.backWaistY - f.neckB[0].y + 18), cbLen - Math.max(slitH, ventH) - 2) : 0;
+  const zipLen = g.zip ? zipLength(g, Math.max(40, f.backWaistY - f.neckB[0].y + 18), cbLen - Math.max(slitH, ventH) - 2) : 0;
   const roles = isColumn ? ({ front: 'front-dress', back: 'back-dress' } as const) : ({ front: 'front-dress', back: 'back-dress' } as const);
 
   const panelDrafts = (p: ReturnType<typeof princessPanels>, isLining: boolean): PieceDraft[] => {
@@ -684,6 +726,10 @@ export function draftPrincessDress(ctx: DraftContext): DraftResult {
   const drafts = panelDrafts(main.p, false);
   if (c.lined) drafts.push(...panelDrafts(make(c.belowWaist - 2.5).p, true));
   else drafts.push(...neckFacings(c, f, f.neckF, f.neckB, fold ? 'fold' : 'seam'));
+  if (c.sleeveless && !c.lined) {
+    useBindingAllowance(c, drafts, ['front-side', 'front-centre', 'back-centre', 'back-side'].map((pieceId) => ({ pieceId, edgeId: 'armhole' })));
+  }
+  if (g.knit && !c.lined) useBindingAllowance(c, drafts, [{ pieceId: 'front-centre', edgeId: 'neck' }, { pieceId: 'back-centre', edgeId: 'neck' }]);
   let built = fitFolds(g, drafts).map(buildPiece);
   const more: PieceDraft[] = [];
   let sections: ReturnType<typeof draftSleeve>['capSections'] = [];
@@ -804,7 +850,10 @@ export function draftWrapDress(ctx: DraftContext): DraftResult {
   const yW = f.frontWaistY;
   const frontFinished = f.inp.bustF / 4 + f.dx / 2 - f.sideSuppression - f.dartFront;
   const backFinished = f.inp.bustF / 4 - f.dx / 2 - f.sideSuppression - f.dartBack;
-  const O = Math.max(8, Math.min(14, 0.55 * frontFinished));
+  // Crossover at the waist: about a quarter of the waist (>= 18 cm), so the
+  // wrap reaches towards the opposite side seam and stays closed when walking
+  // or sitting (limited to the front width).
+  const O = Math.max(8, Math.min(0.95 * frontFinished, Math.max(18, 0.25 * r.waistCm)));
   const hps = f.hpsF;
   // wrap edge: from (-O, yW) up to the (widened) HPS, slightly convex
   const start = { x: -O, y: yW };
@@ -827,14 +876,18 @@ export function draftWrapDress(ctx: DraftContext): DraftResult {
     length: skirtLen,
     frontDartX: A.x,
     cbDrop: 0,
+    sideOnly: c.knitBlock,
   });
   const flared = flareToHem(block.front, block.back, c.hemF);
   const sf = flared.front;
   const sb = flared.back;
   const hemEnd = sf.hem[sf.hem.length - 1];
+  // The front edge angles out towards the hem so the overlap grows with the
+  // flare and the skirt does not open at the knee.
+  const edgeOut = Math.min(6, 0.05 * skirtLen);
   const skirtWaist = dedupe([{ x: -O, y: 0 }, ...sf.waist]);
-  const skirtHem = dedupe([...sf.hem, { x: -O, y: hemEnd.y }]);
-  const frontEdge: Path = [{ x: -O, y: hemEnd.y }, { x: -O, y: 0 }];
+  const skirtHem = dedupe([...sf.hem, { x: -O - edgeOut, y: hemEnd.y }]);
+  const frontEdge: Path = [{ x: -O - edgeOut, y: hemEnd.y }, { x: -O, y: 0 }];
 
   const drafts: PieceDraft[] = [
     {
@@ -950,6 +1003,7 @@ export function draftWrapDress(ctx: DraftContext): DraftResult {
     seamAllowanceCm: g.sa,
   });
   drafts.push(frontFacing, backFacing, ...interfacingOf([frontFacing, backFacing]));
+  if (c.sleeveless) useBindingAllowance(c, drafts, [{ pieceId: 'front-bodice', edgeId: 'armhole' }, { pieceId: 'back-bodice', edgeId: 'armhole' }]);
   const built = fitFolds(g, drafts).map(buildPiece);
   const more: PieceDraft[] = [];
   let sections: ReturnType<typeof draftSleeve>['capSections'] = [];
@@ -989,6 +1043,14 @@ export function draftWrapDress(ctx: DraftContext): DraftResult {
   B.join('facing-shoulders', ['front-facing', 'shoulder'], ['back-facing', 'shoulder'], STAGE.facingPrep);
   B.join('wrap-edge-facing', ['front-facing', 'wrap-edge'], ['front-bodice', 'wrap-edge'], STAGE.neckline, { finish: 'Trim to 0.6 cm, press towards the facing.' });
   B.join('neck-back-facing', ['back-facing', 'neck'], ['back-bodice', 'neck'], STAGE.neckline, { finish: 'Trim, clip and press towards the facing.' });
+  B.single(
+    'wrap-edge-stay',
+    ['front-bodice', 'wrap-edge'],
+    'plain',
+    STAGE.staystitch,
+    `${WRAP_STAY_TAPE}: lay it on the wrong side along the wrap edge, just inside the seam line, cut ${WRAP_STAY_SHORTEN_CM} cm shorter than the edge. Pin the ends, ease the edge onto the tape and stitch through its centre. The tape stops the bias-cut crossover from stretching and gaping.`,
+    'The wrap edge is cut partly on the bias: stay it before any other sewing.',
+  );
   B.single('understitch-wrap', ['front-facing', 'wrap-edge'], 'understitch', STAGE.understitch, 'Understitch the facing so it rolls inside; this stops the crossover edge gaping.');
   B.single('facing-waist', ['front-facing', 'waist'], 'plain', STAGE.waistSeam - 1, 'Baste the facing lower edge to the bodice waist so it is caught in the waist seam.');
   B.join('tie-long', ['wrap-tie', 'long'], ['wrap-tie', 'long'], STAGE.ties, { note: 'Fold each tie lengthwise right sides together and stitch the long edge.' });
@@ -1049,12 +1111,14 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   const pockets = fit.options.pockets;
   const ha = curvedHemAllowance(g, 0.9);
   const cbLenBodice = pathLength(p.centreBack.edges.find((e) => e.id === 'cb')!.points);
-  const skirtZip = 18;
-  const zipTotal = standardZipFor(cbLenBodice + skirtZip);
+  // One zip from the neckline through the waist seam into the skirt: the
+  // drafted opening (bodice + skirt part) matches the standard zip exactly.
+  const zipTotal = zipFor(g, cbLenBodice + 16);
+  const skirtZip = Math.round((zipTotal - ZIP_END_ALLOWANCE_CM[g.zipType] - cbLenBodice) * 10) / 10;
 
   const bodiceDrafts = (layer: 'self' | 'lining' | 'interfacing'): PieceDraft[] => {
     const sfx = layer === 'self' ? '' : `-${layer}`;
-    const label = layer === 'self' ? '' : layer === 'lining' ? ' lining' : ' underlining';
+    const label = layer === 'self' ? '' : layer === 'lining' ? ' lining' : ' underlining (cotton coutil or batiste)';
     const kindOf = (id: string): EdgeDraft['kind'] => (id === 'cf' ? 'fold' : 'seam');
     const mk = (id: string, name: string, role: 'front-bodice' | 'back-bodice', edges: Array<{ id: string; points: Path }>, cut: number, fold: boolean): PieceDraft => ({
       id: id + sfx,
@@ -1071,7 +1135,7 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
       ),
       seamAllowanceCm: g.sa,
       hemAllowanceCm: g.sa,
-      notes: layer === 'interfacing' ? ['Sew-in underlining: baste to the wrong side of the matching panel'] : undefined,
+      notes: layer === 'interfacing' ? ['Sew-in underlining (cotton coutil or batiste): baste to the wrong side of the matching panel; carries the boning channels'] : undefined,
     });
     return [
       mk('front-centre', 'Centre front bodice', 'front-bodice', p.centreFront.edges, 1, true),
@@ -1097,9 +1161,37 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
     { key: 'sb', id: 'skirt-sb', name: 'Skirt side back panel', left: 'side', right: 'seam-cb', half: false },
     { key: 'cb', id: 'skirt-cb', name: 'Skirt centre back panel', left: 'seam-sb', right: 'cb', half: false },
   ];
+  const pleated = ballGownWaistTreatment(g.material) === 'pleats';
+  const pleatPlan = new Map<string, { count: number; intake: number }>();
   const skirtDrafts: PieceDraft[] = panelSpecs.map((s) => {
     const top = Math.min(tops[s.key], bottomFull);
-    const geo = sectorPanel(top, Math.max(bottomFull, top), skirtLen, s.half);
+    let geo = sectorPanel(top, Math.max(bottomFull, top), skirtLen, s.half);
+    if (s.key === 'cb') {
+      // Grain parallel to the centre back: the zip goes into a straight-grain
+      // edge, never a bias one. Rotate the gore so its CB edge is vertical.
+      const [a, b] = geo.right;
+      const ang = Math.atan2(1, 0) - Math.atan2(b.y - a.y, b.x - a.x);
+      const rot = (q: Path) => rotatePath(q, ang, a);
+      geo = { waist: rot(geo.waist), right: rot(geo.right), hem: rot(geo.hem), left: rot(geo.left) };
+    }
+    const bodiceWaist = s.key === 'cf' ? bw('front-centre') : s.key === 'sf' ? bw('front-side') : s.key === 'sb' ? bw('back-side') : bw('back-centre');
+    const extra = pathLength(geo.waist) - bodiceWaist;
+    const notches: PieceDraft['notches'] = [];
+    if (pleated && extra > 2) {
+      // Box pleats: each takes `intake` out of the waist; its two fold lines
+      // are notched and meet at the centre notch.
+      const count = Math.max(1, Math.round(extra / 8));
+      const intake = extra / count;
+      const wl = pathLength(geo.waist);
+      const pitch = wl / count;
+      for (let i = 0; i < count; i++) {
+        const mid = pitch * (i + 0.5);
+        notches.push({ edgeId: 'waist', at: mid - intake / 2, count: 1, label: 'pleat' });
+        notches.push({ edgeId: 'waist', at: mid, count: 2, label: 'pleat centre' });
+        notches.push({ edgeId: 'waist', at: mid + intake / 2, count: 1, label: 'pleat' });
+      }
+      pleatPlan.set(s.id, { count, intake });
+    }
     const edges: EdgeDraft[] = [{ id: 'waist', kind: 'seam', points: geo.waist }];
     if (s.right === 'side' && pockets) edges.push(...pocketSplit(geo.right, true, 3, POCKET_OPENING, 'seam', 2.5));
     else if (s.right === 'cb') {
@@ -1119,6 +1211,7 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
       cutOnFold: s.half,
       mirrorPair: !s.half,
       edges,
+      notches,
       seamAllowanceCm: g.sa,
       hemAllowanceCm: ha,
     };
@@ -1192,14 +1285,51 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   ];
   for (const [bod, sk] of pairs) {
     const ease = edgeLen(pieces, sk, 'waist') - edgeLen(pieces, bod, 'waist');
+    const pl = pleatPlan.get(sk);
+    const bodLen = edgeLen(pieces, bod, 'waist').toFixed(1);
     B.join(`waist-${sk}`, [bod, 'waist'], [sk, 'waist'], STAGE.waistSeam, {
-      type: ease > 1 ? 'gathered' : 'plain',
+      type: pl || pleated || ease <= 1 ? 'plain' : 'gathered',
       ease: Math.max(0, ease),
-      note: ease > 1 ? `Gather ${ease.toFixed(0)} cm of extra skirt fullness into this ${edgeLen(pieces, bod, 'waist').toFixed(1)} cm section: two rows of long stitches, pull up evenly, then stitch.` : undefined,
+      note: pl
+        ? `Fold ${pl.count} box pleat${pl.count > 1 ? 's' : ''} (each takes in ${pl.intake.toFixed(1)} cm): bring the two single "pleat" notches of each pleat to its double "pleat centre" notch, pin and baste across the top, so the skirt edge measures ${bodLen} cm. Structured silk holds a crisp pleat far better than gathers.`
+        : pleated && ease > 0.3
+          ? `Ease the ${ease.toFixed(1)} cm of extra skirt length into this ${bodLen} cm section evenly between the seams (no pleat needed here).`
+          : ease > 1
+          ? `Gather ${ease.toFixed(0)} cm of extra skirt fullness into this ${bodLen} cm section: two rows of long stitches, pull up evenly, then stitch.`
+          : undefined,
     });
   }
+  // Structure: a petersham waist stay carries the weight of the skirt, boning
+  // in the underlining keeps the bodice smooth and up.
+  B.single(
+    'waist-stay',
+    ['front-centre', 'waist'],
+    'plain',
+    STAGE.waistbandFinish + 1,
+    `Waist stay: cut ${GOWN_WAIST_STAY} to your waist plus 5 cm. Hook-and-eye one end, turn the other under, and hand-tack the stay to the waist seam allowance at the centre front, every princess seam and the side seams, ending 1 cm each side of the zip. Fasten it before closing the zip: it takes the skirt's weight off the zip and the bodice.`,
+    'The waist stay keeps the waist seam on your waist even under the weight of the skirt.',
+  );
+  for (const [pid, edge] of [['front-centre-interfacing', 'princess'], ['back-centre-interfacing', 'princess'], ['front-side-interfacing', 'side']] as const) {
+    B.single(
+      `boning-${pid.replace('-interfacing', '')}-${edge}`,
+      [pid, edge],
+      'topstitch',
+      STAGE.princess - 1,
+      `Boning channel: after the ${edge === 'side' ? 'side' : 'princess'} seams are sewn, press the seam allowances open, lay a ${GOWN_BONING} channel over them on the underlining side and stitch along both edges. Slide in boning cut 2 cm shorter than the channel (from 1.5 cm below the armhole seam line to 1.5 cm above the waist seam line), with the cut ends filed smooth or capped.`,
+      `Boning sits on the ${edge} seam of every panel pair, left and right.`,
+    );
+  }
   if (!c.sleeveless) addSleeveSeams(c, sections);
-  for (const s of panelSpecs) addHem(g, s.id, 'hem', true, ha, STAGE.hems, 'Wear the gown over its petticoat and your shoes, then level the hem. A horsehair braid in the hem helps the skirt stand out.');
+  for (const s of panelSpecs)
+    addHem(
+      g,
+      s.id,
+      'hem',
+      true,
+      ha,
+      STAGE.hems,
+      `Wear the gown over its petticoat and in your ${fit.shoeHeelCm ?? 7} cm heels, then level the hem. Sew ${GOWN_HORSEHAIR} to the hem allowance before turning it up: it makes the hem stand away from the body and swing.`,
+    );
 
   // silhouette: fitted bodice, domed skirt
   const hemC = 2 * (bottomFull / 2) + 6 * bottomFull;
@@ -1213,7 +1343,3 @@ export function draftBallGown(ctx: DraftContext): DraftResult {
   return { pieces, seams: B.seams, silhouette };
 }
 
-function standardZipFor(len: number): number {
-  const z = [40, 45, 50, 55, 60, 65, 70];
-  return z.find((x) => x >= len - 1) ?? 70;
-}

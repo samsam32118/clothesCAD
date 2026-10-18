@@ -4,8 +4,13 @@
  * Fabric coordinates: x across the width (0 .. usable width), y along the
  * length (grows down = along the selvedge). The lengthwise grain is the y
  * axis, and every piece's grainline is drafted parallel to its own y axis, so
- * pieces are only ever rotated 0° or 180° (and mirrored for pairs) — the grain
- * is always respected.
+ * fabric pieces are only ever rotated 0° or 180° (and mirrored for pairs) —
+ * the grain is always respected; one-way fabrics (sheen, nap) only 0°.
+ * Interfacing (non-woven fusible / sew-in) has no grain, so its pieces may
+ * also turn 90° / 270°: a waistband strip then lies across the width.
+ * For every layout two packing orders are tried (largest first, and
+ * identical pieces alternating head-to-tail so trapezoid gores nest) and the
+ * shorter one wins.
  *
  * Placement transform (applied to piece.cutLine, in this order):
  *   1. flip    : if `flipped`, mirror x -> -x
@@ -20,13 +25,18 @@
  *   a cut-on-fold piece placed against x = 0 yields one whole piece; any other
  *   placement yields a mirrored pair. Pairs therefore need cutCount/2
  *   placements (copy numbers 1, 3, 5 …: placement k covers copies 2k-1 and 2k).
+ *   A piece needed an odd number of times (e.g. one waistband) has its last
+ *   copy marked `singleLayer`: it is nested like any other piece, but cut
+ *   last, after lifting the top layer away in that area, so only ONE layer is
+ *   cut (cutting both would give an unwanted second piece). Nesting it costs
+ *   no extra fabric; the other layer there becomes a spare scrap.
  * - 'single': single layer, full width. Every copy has its own placement
  *   (copy 1..cutCount, even copies of mirror pairs flipped). A cut-on-fold
  *   piece is cut opened out: its two mirrored halves are two placements of the
  *   same copy that meet exactly at the fold line.
  * Placements never overlap; a 0.5 cm gap is kept between pieces.
  */
-import type { CuttingLayout, CuttingPlacement, FabricLayer, Path, PatternPiece, Point } from './types';
+import type { CuttingLayout, CuttingPlacement, FabricLayer, MaterialPreset, Path, PatternPiece, Point } from './types';
 import { pathBounds, polygonArea, slicePath } from './geometry';
 
 const CELL = 0.5; // cm
@@ -57,20 +67,24 @@ function profileOf(rings: Path[], w: number, h: number): Profile {
   const cols = Math.max(1, Math.ceil(w / CELL));
   const top = new Array<number>(cols).fill(Infinity);
   const bottom = new Array<number>(cols).fill(-Infinity);
+  const SAMPLES = [0.02, 0.5, 0.98]; // three x positions per column so thin features are not missed
   for (const poly of rings) {
     const n = poly.length;
-    for (let c = 0; c < cols; c++) {
-      // sample three x positions in the column so thin features are not missed
-      for (const fx of [0.02, 0.5, 0.98]) {
-        const x = Math.min(w, (c + fx) * CELL);
-        for (let i = 0; i < n; i++) {
-          const a = poly[i];
-          const b = poly[(i + 1) % n];
-          if ((a.x - x) * (b.x - x) <= 0 && a.x !== b.x) {
-            const y = a.y + ((x - a.x) / (b.x - a.x)) * (b.y - a.y);
-            top[c] = Math.min(top[c], y);
-            bottom[c] = Math.max(bottom[c], y);
-          }
+    for (let i = 0; i < n; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
+      if (a.x === b.x) continue;
+      const x0 = Math.min(a.x, b.x);
+      const x1 = Math.max(a.x, b.x);
+      const c0 = Math.max(0, Math.floor(x0 / CELL) - 1);
+      const c1 = Math.min(cols - 1, Math.floor(x1 / CELL) + 1);
+      for (let c = c0; c <= c1; c++) {
+        for (const fx of SAMPLES) {
+          const x = Math.min(w, (c + fx) * CELL);
+          if (x < x0 || x > x1) continue;
+          const y = a.y + ((x - a.x) / (b.x - a.x)) * (b.y - a.y);
+          if (y < top[c]) top[c] = y;
+          if (y > bottom[c]) bottom[c] = y;
         }
       }
     }
@@ -111,7 +125,9 @@ interface Item {
   copy: number;
   flipped: boolean;
   /** Which orientations may be tried. */
-  rotations: Array<0 | 180>;
+  rotations: Rotation[];
+  /** Folded layout: cut through one layer only (odd copy of a non-fold piece). */
+  single: boolean;
   /** Folded layout: this item must touch the fold at x = 0. */
   onFold: boolean;
   /** Single layout opened-out fold piece: place this item and its mirror twin together. */
@@ -128,16 +144,18 @@ function foldSide(piece: PatternPiece): 'min' | 'max' | null {
   return x - b.minX < b.maxX - x ? 'min' : 'max';
 }
 
+type Rotation = 0 | 90 | 180 | 270;
+
 interface Oriented {
   poly: Path; // transformed (flip/rotate) and shifted so bounds min = 0
   w: number;
   h: number;
-  rotationDeg: 0 | 180;
+  rotationDeg: Rotation;
   flipped: boolean;
   shift: Point; // translation already applied after flip/rotate
 }
 
-function orient(piece: PatternPiece, rotationDeg: 0 | 180, flipped: boolean): Oriented {
+function orient(piece: PatternPiece, rotationDeg: Rotation, flipped: boolean): Oriented {
   const t = placePath(piece.cutLine, { x: 0, y: 0, rotationDeg, flipped });
   const b = pathBounds(t);
   return {
@@ -155,6 +173,7 @@ class Skyline {
   constructor(readonly cols: number) {
     this.h = new Array<number>(cols).fill(0);
   }
+
   /** Lowest y (cells) at which the profile fits with its left column at x. */
   fitAt(p: Profile, x: number): number {
     let y = 0;
@@ -179,7 +198,22 @@ class Skyline {
  * are still placed (flush left) and will extend past the selvedge; the
  * quality checks report this.
  */
-export function layoutPieces(pieces: PatternPiece[], fabricWidthCm: number, layer: FabricLayer): CuttingLayout {
+export interface LayoutOptions {
+  /**
+   * One-way fabric (lustrous sheen, nap or pile): every piece must point the
+   * same way, so the 180° turn is not allowed.
+   */
+  oneWay?: boolean;
+}
+
+/** True when a fabric's sheen or nap changes with direction (needs a with-nap layout). */
+export function isOneWayFabric(material: Pick<MaterialPreset, 'sheen' | 'description'>): boolean {
+  return material.sheen === 'lustrous' || material.sheen === 'high' || /\bnap\b|\bpile\b|one[- ]way/i.test(material.description);
+}
+
+export function layoutPieces(pieces: PatternPiece[], fabricWidthCm: number, layer: FabricLayer, options: LayoutOptions = {}): CuttingLayout {
+  // Interfacing has no grain: strips may lie across the width.
+  const turns: Rotation[] = layer === 'interfacing' ? [0, 90, 180, 270] : options.oneWay ? [0] : [0, 180];
   const hasFold = pieces.some((p) => p.cutOnFold);
   const maxW = Math.max(0, ...pieces.map((p) => p.bounds.maxX - p.bounds.minX));
   const folded = hasFold && maxW + GAP <= fabricWidthCm / 2;
@@ -201,83 +235,104 @@ export function layoutPieces(pieces: PatternPiece[], fabricWidthCm: number, laye
   for (const p of sorted) {
     if (folded) {
       if (p.cutOnFold) {
-        for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: false, rotations: [0], onFold: true, twin: false });
+        for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: false, rotations: [0], onFold: true, twin: false, single: false });
       } else {
-        const n = Math.ceil(p.cutCount / 2);
-        for (let k = 0; k < n; k++) items.push({ piece: p, copy: 2 * k + 1, flipped: false, rotations: [0, 180], onFold: false, twin: false });
+        const pairs = Math.floor(p.cutCount / 2);
+        for (let k = 0; k < pairs; k++) items.push({ piece: p, copy: 2 * k + 1, flipped: false, rotations: turns, onFold: false, twin: false, single: false });
+        if (p.cutCount % 2 === 1) items.push({ piece: p, copy: p.cutCount, flipped: false, rotations: turns, onFold: false, twin: false, single: true });
       }
     } else if (p.cutOnFold) {
-      for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: false, rotations: [0], onFold: false, twin: true });
+      for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: false, rotations: [0], onFold: false, twin: true, single: false });
     } else {
-      for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: p.mirrorPair && k % 2 === 0, rotations: [0, 180], onFold: false, twin: false });
+      for (let k = 1; k <= p.cutCount; k++) items.push({ piece: p, copy: k, flipped: p.mirrorPair && k % 2 === 0, rotations: turns, onFold: false, twin: false, single: false });
     }
   }
+  const ordered = items;
 
-  const sky = new Skyline(cols);
-  const placements: CuttingPlacement[] = [];
-  let usedArea = 0;
-  for (const it of items) {
-    if (it.twin) {
-      // opened-out fold piece: the half whose fold is on its right, plus the mirror on its left
-      const side = foldSide(it.piece);
-      const leftFlip = side === 'max' ? false : true; // left half has its fold on the right
-      const left = orient(it.piece, 0, leftFlip);
-      const right = orient(it.piece, 0, !leftFlip);
-      // combined polygon: left at x in [0, w], right starting at the fold (x = left.w minus its own fold offset 0)
-      const w = left.w + right.w;
-      const h = Math.max(left.h, right.h);
-      const prof = profileOf([left.poly, right.poly.map((p) => ({ x: p.x + left.w, y: p.y }))], w, h);
-      const pos = bestPosition(sky, prof, cols, false);
-      sky.place(prof, pos.x, pos.y);
-      const x0 = (pos.x + prof.pad) * CELL;
-      const y0 = pos.y * CELL;
-      placements.push({ pieceId: it.piece.id, copy: it.copy, x: round(x0 + left.shift.x), y: round(y0 + left.shift.y), rotationDeg: 0, flipped: leftFlip });
-      placements.push({ pieceId: it.piece.id, copy: it.copy, x: round(x0 + left.w + right.shift.x), y: round(y0 + right.shift.y), rotationDeg: 0, flipped: !leftFlip });
-      usedArea += 2 * polygonArea(it.piece.cutLine);
-      continue;
-    }
-    let best: { o: Oriented; prof: Profile; x: number; y: number } | null = null;
-    const flips = it.onFold ? [foldSide(it.piece) === 'max'] : [it.flipped];
-    for (const rot of it.rotations) {
-      for (const fl of flips) {
-        const o = orient(it.piece, rot, fl);
-        const prof = profileOf([o.poly], o.w, o.h);
-        const pos = bestPosition(sky, prof, cols, it.onFold);
-        if (!best || pos.y + prof.height < best.y + best.prof.height - 1e-9 || (pos.y + prof.height === best.y + best.prof.height && pos.x < best.x)) {
-          best = { o, prof, x: pos.x, y: pos.y };
+  const pack = (alternate: boolean) => {
+    const sky = new Skyline(cols);
+    const placements: CuttingPlacement[] = [];
+    let usedArea = 0;
+    const seen = new Map<string, number>();
+    for (const it of ordered) {
+      if (it.twin) {
+        // opened-out fold piece: the half whose fold is on its right, plus the mirror on its left
+        const side = foldSide(it.piece);
+        const leftFlip = side === 'max' ? false : true; // left half has its fold on the right
+        const left = orient(it.piece, 0, leftFlip);
+        const right = orient(it.piece, 0, !leftFlip);
+        const w = left.w + right.w;
+        const h = Math.max(left.h, right.h);
+        const prof = profileOf([left.poly, right.poly.map((p) => ({ x: p.x + left.w, y: p.y }))], w, h);
+        const pos = bestPosition(sky, prof, cols, false);
+        sky.place(prof, pos.x, pos.y);
+        const x0 = (pos.x + prof.pad) * CELL;
+        const y0 = pos.y * CELL;
+        placements.push({ pieceId: it.piece.id, copy: it.copy, x: round(x0 + left.shift.x), y: round(y0 + left.shift.y), rotationDeg: 0, flipped: leftFlip });
+        placements.push({ pieceId: it.piece.id, copy: it.copy, x: round(x0 + left.w + right.shift.x), y: round(y0 + right.shift.y), rotationDeg: 0, flipped: !leftFlip });
+        usedArea += 2 * polygonArea(it.piece.cutLine);
+        continue;
+      }
+      // Alternate strategy: repeated copies of one piece prefer to turn
+      // head-to-tail every other time, so gores and trapezoids nest.
+      const nth = seen.get(it.piece.id) ?? 0;
+      seen.set(it.piece.id, nth + 1);
+      let rotations = it.rotations;
+      if (alternate && rotations.includes(180) && nth % 2 === 1) rotations = [180, ...rotations.filter((r) => r !== 180)];
+      let best: { o: Oriented; prof: Profile; x: number; y: number } | null = null;
+      const flips = it.onFold ? [foldSide(it.piece) === 'max'] : [it.flipped];
+      for (const rot of rotations) {
+        for (const fl of flips) {
+          const o = orient(it.piece, rot, fl);
+          const prof = profileOf([o.poly], o.w, o.h);
+          if (prof.cols - 2 * prof.pad > cols && rot % 180 !== 0) continue; // a turned strip must fit the width
+          const pos = bestPosition(sky, prof, cols, it.onFold);
+          const end = pos.y + prof.height;
+          const bestEnd = best ? best.y + best.prof.height : Infinity;
+          // alternate: keep the preferred (first) orientation unless another is clearly shorter
+          const margin = alternate && best ? Math.ceil(1 / CELL) : 0;
+          if (!best || end < bestEnd - margin - 1e-9 || (end === bestEnd && !alternate && pos.x < best.x)) {
+            best = { o, prof, x: pos.x, y: pos.y };
+          }
         }
       }
+      if (!best) continue;
+      sky.place(best.prof, best.x, best.y);
+      const x0 = (best.x + best.prof.pad) * CELL;
+      const y0 = best.y * CELL;
+      placements.push({
+        pieceId: it.piece.id,
+        copy: it.copy,
+        x: round(x0 + best.o.shift.x),
+        y: round(y0 + best.o.shift.y),
+        rotationDeg: best.o.rotationDeg,
+        flipped: best.o.flipped,
+        ...(it.single ? { singleLayer: true } : {}),
+      });
+      usedArea += polygonArea(it.piece.cutLine);
     }
-    if (!best) continue;
-    sky.place(best.prof, best.x, best.y);
-    const x0 = (best.x + best.prof.pad) * CELL;
-    const y0 = best.y * CELL;
-    placements.push({
-      pieceId: it.piece.id,
-      copy: it.copy,
-      x: round(x0 + best.o.shift.x),
-      y: round(y0 + best.o.shift.y),
-      rotationDeg: best.o.rotationDeg,
-      flipped: best.o.flipped,
-    });
-    usedArea += polygonArea(it.piece.cutLine);
-  }
-  // actual length from placed outlines
-  let length = 0;
-  for (const pl of placements) {
-    const piece = pieces.find((p) => p.id === pl.pieceId);
-    if (!piece) continue;
-    const b = pathBounds(placePath(piece.cutLine, pl));
-    length = Math.max(length, b.maxY);
-  }
-  length = Math.ceil(length);
+    // actual length from placed outlines
+    let length = 0;
+    for (const pl of placements) {
+      const piece = pieces.find((p) => p.id === pl.pieceId);
+      if (!piece) continue;
+      const b = pathBounds(placePath(piece.cutLine, pl));
+      length = Math.max(length, b.maxY);
+    }
+    return { placements, usedArea, length: Math.ceil(length) };
+  };
+
+  const a = pack(false);
+  const hasRepeats = items.some((i, k) => !i.twin && items.findIndex((j) => j.piece.id === i.piece.id) !== k);
+  const b = hasRepeats && turns.includes(180) ? pack(true) : a;
+  const best = b.length < a.length ? b : a;
   return {
     layer,
     fabricWidthCm,
     fold: folded ? 'folded' : 'single',
-    lengthCm: length,
-    placements,
-    efficiency: length > 0 ? Math.round((usedArea / (usable * length)) * 1000) / 1000 : 0,
+    lengthCm: best.length,
+    placements: best.placements,
+    efficiency: best.length > 0 ? Math.round((best.usedArea / (usable * best.length)) * 1000) / 1000 : 0,
   };
 }
 

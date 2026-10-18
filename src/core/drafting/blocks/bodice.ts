@@ -44,7 +44,7 @@ import {
   dedupe,
 } from '../../geometry';
 import { apexDrop } from '../../measurements';
-import { hemCurve } from './skirt';
+import { hemCurve, MIN_DART_INTAKE } from './skirt';
 
 export interface LowerInput {
   hipF: number;
@@ -70,6 +70,11 @@ export interface BodiceInput {
   minNeckOpening?: number;
   /** Take waist suppression with darts (else side seams only). */
   waistDarts: boolean;
+  /**
+   * Knit block (stretch knits): no bust or waist darts, the fabric's stretch
+   * and the side seams do the shaping.
+   */
+  knitBlock?: boolean;
   lower?: LowerInput;
 }
 
@@ -242,7 +247,8 @@ export function bodiceFrame(inp: BodiceInput): BodiceFrame {
   let frontWaistY = A.y + (r.frontWaistLengthCm - r.shoulderToBustPointCm);
   let I = frontWaistY - backWaistY;
   I = clamp(I, 0, 7);
-  if (I < 0.8) I = 0;
+  // darts under 1 cm cannot be sewn meaningfully; knits need none at all
+  if (I < MIN_DART_INTAKE || inp.knitBlock) I = 0;
   frontWaistY = backWaistY + I;
 
   // waist suppression
@@ -250,7 +256,7 @@ export function bodiceFrame(inp: BodiceInput): BodiceFrame {
   let s: number;
   let dF = 0;
   let dB = 0;
-  if (inp.waistDarts && T > 2) {
+  if (inp.waistDarts && !inp.knitBlock && T > 2) {
     s = clamp(0.2 * T, 0, 2.5);
     const R = T - 2 * s;
     dF = 0.45 * R;
@@ -265,11 +271,11 @@ export function bodiceFrame(inp: BodiceInput): BodiceFrame {
       dB = 4;
     }
     s += over / 2;
-    if (dF < 0.6) {
+    if (dF < MIN_DART_INTAKE) {
       s += dF / 2;
       dF = 0;
     }
-    if (dB < 0.6) {
+    if (dB < MIN_DART_INTAKE) {
       s += dB / 2;
       dB = 0;
     }
@@ -505,11 +511,12 @@ function indexOfPoint(p: Path, q: Point): number {
  * rotated out of the side panel (closing it) so its shaping becomes the curve
  * of the princess seam. Back: armhole princess through the shoulder-blade dart.
  */
-export function princessPanels(f: BodiceFrame): PrincessResult {
+export function princessPanels(f: BodiceFrame, opts: { cbShapingCm?: number } = {}): PrincessResult {
   const A = f.apex;
   const lower = f.lower;
   const frontBottomY = f.bottomBackY + f.bustDart;
   const flare = lower?.princessFlare ?? 0;
+  const down = { x: 0, y: 1 };
 
   // ---------------- front
   const { side: fSide, legs } = frontSide(f);
@@ -526,8 +533,14 @@ export function princessPanels(f: BodiceFrame): PrincessResult {
   if (lower) {
     const endY = wy + lower.hipDepth - 3;
     const hemY = frontBottomY;
-    lowerLeft = [A, ...splineThrough([A, legL, { x: A.x, y: endY }]).slice(1), { x: A.x + flare, y: hemY }];
-    lowerRight = [A, ...splineThrough([A, legR, { x: A.x, y: endY }]).slice(1), { x: A.x - flare, y: hemY }];
+    // One continuous curve from the bust point through the waist to the hip,
+    // leaving the bust vertically and arriving at the hip already heading for
+    // the hem point, so neither the bust nor the hip gets a corner.
+    const hemL = { x: A.x + flare, y: hemY };
+    const hemR = { x: A.x - flare, y: hemY };
+    const endPt = { x: A.x, y: endY };
+    lowerLeft = [A, ...splineThrough([A, legL, endPt], { startTangent: down, endTangent: normalize(sub(hemL, endPt)) }).slice(1), hemL];
+    lowerRight = [A, ...splineThrough([A, legR, endPt], { startTangent: down, endTangent: normalize(sub(hemR, endPt)) }).slice(1), hemR];
   } else {
     lowerLeft = [A, legL];
     lowerRight = [A, legR];
@@ -599,19 +612,36 @@ export function princessPanels(f: BodiceFrame): PrincessResult {
   const Tb = { x: f.backDartX, y: Math.min(f.chestY + 1.5, f.backWaistY - 10) };
   const bCurve = cubicBezier(Qb, { x: Qb.x - 0.5 * (Qb.x - Tb.x), y: Qb.y + 0.2 * (Tb.y - Qb.y) }, { x: Tb.x, y: Tb.y - 0.4 * (Tb.y - Qb.y) }, Tb);
   const by = f.backWaistY;
-  const bl = { x: f.backDartX - f.dartBack / 2, y: by };
+  // Centre-back seam shaping (sway back): take `cbIn` in at the waist and give
+  // the same amount back to the princess suppression so the waist is unchanged.
+  const cbIn = lower ? Math.min(opts.cbShapingCm ?? 0, 0.45 * f.dartBack) : 0;
+  const bl = { x: f.backDartX - f.dartBack / 2 + cbIn, y: by };
   const br = { x: f.backDartX + f.dartBack / 2, y: by };
   let bLeft: Path;
   let bRight: Path;
   if (lower) {
     const endY = by + lower.hipDepth - 2;
-    bLeft = [Tb, ...splineThrough([Tb, bl, { x: f.backDartX, y: endY }]).slice(1), { x: f.backDartX + flare, y: f.bottomBackY }];
-    bRight = [Tb, ...splineThrough([Tb, br, { x: f.backDartX, y: endY }]).slice(1), { x: f.backDartX - flare, y: f.bottomBackY }];
+    const endPt = { x: f.backDartX, y: endY };
+    const hemL = { x: f.backDartX + flare, y: f.bottomBackY };
+    const hemR = { x: f.backDartX - flare, y: f.bottomBackY };
+    bLeft = [Tb, ...splineThrough([Tb, bl, endPt], { startTangent: down, endTangent: normalize(sub(hemL, endPt)) }).slice(1), hemL];
+    bRight = [Tb, ...splineThrough([Tb, br, endPt], { startTangent: down, endTangent: normalize(sub(hemR, endPt)) }).slice(1), hemR];
   } else {
     bLeft = splineThrough([Tb, bl]);
     bRight = splineThrough([Tb, br]);
   }
   const cbPrincess = dedupe([...bCurve, ...bLeft.slice(1)]);
+  let cbPath: Path = [{ x: 0, y: f.bottomBackY }, f.neckB[0]];
+  if (cbIn > 0.05 && lower) {
+    const hipY = Math.min(by + lower.hipDepth, f.bottomBackY - 1);
+    const bladeY = Math.max(f.neckB[0].y + 2, by - 16);
+    const up = { x: 0, y: -1 };
+    cbPath = dedupe([
+      { x: 0, y: f.bottomBackY },
+      ...splineThrough([{ x: 0, y: hipY }, { x: cbIn, y: by }, { x: 0, y: bladeY }], { startTangent: up, endTangent: up }),
+      f.neckB[0],
+    ]);
+  }
   const cbBottomStart = cbPrincess[cbPrincess.length - 1];
   const cbBottom: Path = lower
     ? hemCurve(cbBottomStart, normalize(sub(cbBottomStart, cbPrincess[Math.max(0, cbPrincess.length - 4)])), { x: 0, y: f.bottomBackY })
@@ -623,7 +653,7 @@ export function princessPanels(f: BodiceFrame): PrincessResult {
       { id: 'armhole', points: bArmUpper },
       { id: 'princess', points: cbPrincess },
       { id: lower ? 'hem' : 'waist', points: cbBottom },
-      { id: 'cb', points: [{ x: 0, y: f.bottomBackY }, f.neckB[0]] },
+      { id: 'cb', points: cbPath },
     ],
   };
   const sbSide = f.profile;

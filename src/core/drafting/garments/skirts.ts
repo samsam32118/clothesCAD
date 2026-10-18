@@ -25,6 +25,7 @@ import {
   pieceById,
   pocketSplit,
   zipLength,
+  zipPhrase,
   fitFolds,
   type DraftResult,
   type G,
@@ -88,7 +89,7 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
   const lined = opts.lining;
   const pockets = opts.pockets;
   const ha = kind === 'circle-skirt' ? curvedHemAllowance(g, 1) : kind === 'a-line-skirt' ? curvedHemAllowance(g, opts.flare) : g.ha;
-  const zipLen = g.zip ? zipLength(Math.max(18, r.waistToHipCm - 1), length) : 0;
+  const zipLen = g.zip ? zipLength(g, Math.max(18, r.waistToHipCm - 1), length) : 0;
 
   // ------------------------------------------------------------------ shape
   type Shape = { front: SkirtPanel[]; back: SkirtPanel[]; knots: Knot[] };
@@ -257,7 +258,7 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
     B.join('pocket-bag', ['pocket-bag', 'bag'], ['pocket-bag', 'bag'], STAGE.pocketBag, { note: 'Stitch the front and back bags together around the curve; finish the edges together.' });
   }
   const cbPiece = backIds[backIds.length - 1];
-  const zipNote = `Use a ${zipLen} cm ${g.closure === 'lapped-zip' ? 'regular (lapped)' : 'invisible'} zip; the top stop sits 0.5 cm below the waistband seam line.`;
+  const zipNote = `Use ${zipPhrase(g, zipLen)}; the top stop sits 0.5 cm below the waistband seam line.`;
   if (hasEdge(pieces, cbPiece, 'cb-zip')) B.join('cb-zip', [cbPiece, 'cb-zip'], [cbPiece, 'cb-zip'], STAGE.zip, { type: g.zipType, note: zipNote, finish: 'Finish both centre-back edges before inserting the zip.' });
   if (hasEdge(pieces, cbPiece, 'cb') && pieceById(pieces, cbPiece).edges.find((e) => e.id === 'cb')?.kind !== 'fold') {
     B.join('cb', [cbPiece, 'cb'], [cbPiece, 'cb'], STAGE.centreSeam, { note: g.zip ? 'From the bottom of the zip to the hem (or vent).' : undefined });
@@ -302,7 +303,7 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
     const ease = dartIntakeOn(p, 'waist');
     B.join(`waistband-${pid}-${m[2]}`, [pid, 'waist'], ['waistband', s.edgeId], STAGE.waistband, {
       ease,
-      note: ease > 0 ? `The skirt edge is ${ease.toFixed(1)} cm longer because of the darts; sew the darts first and it matches.` : elastic ? 'Casing joined flat; the elastic gathers it later.' : undefined,
+      note: ease > 0 ? `The flat skirt edge includes ${ease.toFixed(1)} cm of dart; with the darts sewn the edges match.` : elastic ? 'Casing joined flat; the elastic gathers it later.' : undefined,
     });
   }
   if (elastic) {
@@ -312,7 +313,7 @@ export function draftSkirt(ctx: DraftContext): DraftResult {
     B.single('waistband-ends', ['waistband', 'end-start'], 'plain', STAGE.waistbandFinish, 'Fold the waistband right sides together and stitch across both ends; trim, turn and press.');
     B.single('waistband-ends-2', ['waistband', 'end-end'], 'plain', STAGE.waistbandFinish, 'Stitch across the other end the same way.');
     if (hasEdge(pieces, 'waistband', 'ext-end')) B.single('waistband-underlap', ['waistband', 'ext-end'], 'plain', STAGE.waistbandFinish, 'The 3 cm extension is the underlap behind the zip: stitch its lower edge closed when you stitch the end, then sew the hook or button on it.');
-    B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Turn the inner edge under and stitch in the ditch from the right side, catching it underneath. Sew on a hook and eye at the top of the zip.');
+    B.single('waistband-inner', ['waistband', 'inner'], 'topstitch', STAGE.waistbandFinish, 'Turn the inner edge under and stitch in the ditch from the right side, catching it underneath.');
   }
   for (const id of allPanels) addHem(g, id, 'hem', kind !== 'pencil-skirt', ha, STAGE.hems, kind === 'circle-skirt' ? 'Hang the skirt for 24 hours before hemming so the bias sections can drop; then level the hem.' : undefined);
 

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="clothesCAD - design women's garments from your measurements: patterns, cutting layouts, sewing steps and a 3D preview." />
+    <meta name="theme-color" content="#f6f2ea" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16130f" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,opsz,wght@0,6..96,400..700;1,6..96,400..600&family=Inter:wght@400;500;600&display=swap"
+    />
+    <title>clothesCAD</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- Agents: the last command result as JSON (see AGENTS.md). -->
+    <pre id="agent-output" hidden aria-hidden="true"></pre>
+    <noscript>clothesCAD needs JavaScript. Agents without a browser can use the CLI: npm run cli -- help</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

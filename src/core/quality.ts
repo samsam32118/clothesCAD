@@ -12,13 +12,14 @@ import {
   pathLength,
   pointInPolygon,
   polygonArea,
+  polygonsOverlap,
   selfIntersections,
-  segmentsIntersect,
   slicePath,
 } from './geometry';
 import { placePath } from './layout';
 import { headCircumference, heelInstepCircumference } from './measurements';
 import { strideHemNeeded } from './fit/plan';
+import { frenchSeamBlocker, ZIP_END_ALLOWANCE_CM, zipForOpening } from './drafting/seams';
 
 const SEAM_TOL = 0.3;
 
@@ -29,32 +30,6 @@ function check(id: string, ok: boolean, failSeverity: QualityCheck['severity'], 
 /** How many physical copies of an edge exist in the finished garment per drafted edge (fold pieces count twice). */
 function multiplicity(p: PatternPiece): number {
   return p.cutOnFold ? 2 * p.cutCount : p.cutCount;
-}
-
-function polygonsOverlap(a: { x: number; y: number }[], b: { x: number; y: number }[]): boolean {
-  const ba = pathBounds(a);
-  const bb = pathBounds(b);
-  if (ba.maxX <= bb.minX || bb.maxX <= ba.minX || ba.maxY <= bb.minY || bb.maxY <= ba.minY) return false;
-  // edge crossings (ignore touching within 1 mm by shrinking test to proper crossings)
-  for (let i = 0; i < a.length; i++) {
-    const a0 = a[i];
-    const a1 = a[(i + 1) % a.length];
-    for (let j = 0; j < b.length; j++) {
-      const b0 = b[j];
-      const b1 = b[(j + 1) % b.length];
-      if (Math.max(a0.x, a1.x) < Math.min(b0.x, b1.x) || Math.max(b0.x, b1.x) < Math.min(a0.x, a1.x)) continue;
-      if (Math.max(a0.y, a1.y) < Math.min(b0.y, b1.y) || Math.max(b0.y, b1.y) < Math.min(a0.y, a1.y)) continue;
-      if (segmentsIntersect(a0, a1, b0, b1)) {
-        // touching along the fold line of an opened-out piece is allowed
-        if (Math.abs(a0.x - a1.x) < 1e-6 && Math.abs(b0.x - b1.x) < 1e-6 && Math.abs(a0.x - b0.x) < 1e-6) continue;
-        return true;
-      }
-    }
-  }
-  // containment
-  const inA = (q: { x: number; y: number }) => pointInPolygon(q, a) && distToPolygon(q, a) > 0.05;
-  const inB = (q: { x: number; y: number }) => pointInPolygon(q, b) && distToPolygon(q, b) > 0.05;
-  return b.some(inA) || a.some(inB);
 }
 
 export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
@@ -162,12 +137,28 @@ export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
   // 8. wearability: can the garment be put on?
   const wear: string[] = [];
   const zip = pkg.seams.find((s) => s.type === 'zip-invisible' || s.type === 'zip-lapped');
-  const zipLen = zip ? (byId.get(zip.a.pieceId)?.edges.find((x) => x.id === zip.a.edgeId)?.lengthCm ?? 0) : 0;
+  const zipLen = zipOpeningCm(pkg);
   const closure = pkg.fit.options.closure;
   const stretch = knit ? pkg.material.stretchPct / 100 : 0;
   if (closure === 'invisible-zip' || closure === 'lapped-zip' || (closure === 'buttons' && zip)) {
-    const need = cat === 'skirt' || cat === 'trousers' ? 14 : 30;
-    if (zipLen < need) wear.push(`zip opening ${zipLen.toFixed(1)} cm is shorter than the ${need} cm needed to step in`);
+    let need = 14;
+    if (cat !== 'skirt' && cat !== 'trousers') {
+      // A bodice whose waist and hem already pass over bust and hips only needs
+      // the zip to get the head through the neckline; otherwise it must open past the waist.
+      const f = pkg.fit.finished;
+      const L = pkg.body.landmarks;
+      const pass = r.bustCm + 2;
+      const passes =
+        (f.waist ?? 0) * (1 + stretch) >= pass &&
+        (f.hem ?? 0) * (1 + stretch) >= pass &&
+        ((f.hem ?? 0) * (1 + stretch) >= r.hipCm + 2 || pkg.fit.hemHeightFromFloorCm > L.hip);
+      const neck = pieces
+        .filter((p) => p.layer === 'self')
+        .flatMap((p) => p.edges.filter((x) => x.id === 'neck').map((x) => x.lengthCm * multiplicity(p)))
+        .reduce((a, b) => a + b, 0);
+      need = passes ? Math.max(12, (headCircumference(r.heightCm) + (knit ? 0 : 2) - neck) / 2) : 30;
+    }
+    if (zipLen < need) wear.push(`zip opening ${zipLen.toFixed(1)} cm is shorter than the ${need.toFixed(0)} cm needed to get the garment on`);
   }
   const neckEdges = pieces.filter((p) => p.layer === 'self').flatMap((p) => p.edges.filter((x) => x.id === 'neck').map((x) => x.lengthCm * multiplicity(p)));
   if (closure === 'none' && neckEdges.length) {
@@ -234,7 +225,7 @@ export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
   const hemH = pkg.fit.hemHeightFromFloorCm;
   const L = pkg.body.landmarks;
   const calfBand = hemH > L.calf - 3 && hemH < L.calf + 3 && cat !== 'trousers' && cat !== 'top';
-  out.push(check('hem-placement', hemH >= 0 && !calfBand, 'warning', `Hem sits ${hemH} cm from the floor, clear of the widest part of the calf.`, calfBand ? `Hem at ${hemH} cm cuts across the widest part of the calf (${L.calf.toFixed(0)} cm).` : `Hem height ${hemH} cm is invalid.`));
+  out.push(check('hem-placement', hemH + (pkg.fit.shoeHeelCm ?? 0) >= 0 && !calfBand, 'warning', `Hem sits ${hemH} cm from the floor, clear of the widest part of the calf.`, calfBand ? `Hem at ${hemH} cm cuts across the widest part of the calf (${L.calf.toFixed(0)} cm).` : `Hem height ${hemH} cm is invalid.`));
 
   // 12. fabric quantity in the bill of materials covers the layout
   const fabric = pkg.bom.find((b) => b.kind === 'fabric');
@@ -261,8 +252,48 @@ export function runQualityChecks(pkg: DesignPackage): QualityCheck[] {
     );
   }
 
+  // 15. seam types can actually be sewn (no French seam on a facing, binding, curve or zip)
+  const badFrench = pkg.seams
+    .filter((s) => s.type === 'french')
+    .map((s) => ({ id: s.id, why: frenchSeamBlocker(s, pieces, pkg.seams) }))
+    .filter((x) => x.why !== null);
+  out.push(
+    check(
+      'seam-types',
+      badFrench.length === 0,
+      'warning',
+      'Every seam type can be sewn as specified.',
+      `French seam impossible on: ${badFrench.slice(0, 4).map((x) => `${x.id} (${x.why})`).join(', ')}`,
+    ),
+  );
+
+  // 16. the drafted zip opening (all its edges together) matches a zip sold in shops
+  const zipIssues: string[] = [];
+  if (zip) {
+    const type = zip.type as 'zip-invisible' | 'zip-lapped';
+    const opening = zipOpeningCm(pkg);
+    const z = zipForOpening(opening, type);
+    const drafted = opening + ZIP_END_ALLOWANCE_CM[type];
+    if (Math.abs(z - drafted) > 0.6) zipIssues.push(`${opening.toFixed(1)} cm opening needs a ${drafted.toFixed(1)} cm zip, not a standard length (nearest ${z} cm)`);
+  }
+  out.push(check('zip-length', zipIssues.length === 0, 'warning', 'The zip opening is drafted to a standard zip length.', zipIssues.join('; ')));
+
   // 14. pieces have sensible size
   const tiny = pieces.filter((p) => polygonArea(p.seamLine) < 4).map((p) => p.id);
   out.push(check('piece-size', tiny.length === 0, 'warning', 'All pieces have a workable size.', `Very small pieces: ${tiny.join(', ')}`));
   return out;
+}
+
+/** Total drafted zip opening (cm): every distinct main-fabric zip edge (bodice + skirt on a gown). */
+function zipOpeningCm(pkg: DesignPackage): number {
+  const seen = new Set<string>();
+  let total = 0;
+  for (const s of pkg.seams) {
+    if (s.type !== 'zip-invisible' && s.type !== 'zip-lapped') continue;
+    const key = `${s.a.pieceId}.${s.a.edgeId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    total += pkg.pieces.find((p) => p.id === s.a.pieceId)?.edges.find((x) => x.id === s.a.edgeId)?.lengthCm ?? 0;
+  }
+  return total;
 }

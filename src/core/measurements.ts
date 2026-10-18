@@ -10,6 +10,7 @@
  * audited; each formula reproduces the reference body within ~1 cm and scales
  * sensibly from petite (150 cm) to tall (190 cm) and XS to 4XL.
  */
+import { MEASUREMENT_FIELDS, MEASUREMENT_KEYS, REQUIRED_MEASUREMENT_KEYS, measurementSchemaIssues } from './schema';
 import type {
   BodyLandmarks,
   MeasurementIssue,
@@ -19,66 +20,14 @@ import type {
   ResolvedMeasurements,
 } from './types';
 
-const REQUIRED: Array<'heightCm' | 'bustCm' | 'waistCm' | 'hipCm'> = ['heightCm', 'bustCm', 'waistCm', 'hipCm'];
+const LABELS: Record<MeasurementKey, string> = Object.fromEntries(
+  MEASUREMENT_KEYS.map((k) => [k, MEASUREMENT_FIELDS[k].label]),
+) as Record<MeasurementKey, string>;
 
-const LABELS: Record<MeasurementKey, string> = {
-  heightCm: 'height',
-  bustCm: 'bust',
-  waistCm: 'waist',
-  hipCm: 'hip',
-  underbustCm: 'underbust',
-  highHipCm: 'high hip',
-  neckCm: 'neck',
-  shoulderWidthCm: 'shoulder width',
-  shoulderLengthCm: 'shoulder length',
-  backWaistLengthCm: 'back waist length',
-  frontWaistLengthCm: 'front waist length',
-  shoulderToBustPointCm: 'shoulder to bust point',
-  bustPointDistanceCm: 'bust point distance',
-  armLengthCm: 'arm length',
-  upperArmCm: 'upper arm',
-  elbowCm: 'elbow',
-  wristCm: 'wrist',
-  waistToHipCm: 'waist to hip',
-  waistToKneeCm: 'waist to knee',
-  waistToFloorCm: 'waist to floor',
-  crotchDepthCm: 'crotch depth',
-  inseamCm: 'inseam',
-  thighCm: 'thigh',
-  kneeCm: 'knee',
-  calfCm: 'calf',
-  ankleCm: 'ankle',
-};
-
-/** Plausible ranges for adult women (cm). Outside -> warning; far outside -> error. */
-const RANGES: Record<MeasurementKey, { min: number; max: number }> = {
-  heightCm: { min: 140, max: 200 },
-  bustCm: { min: 70, max: 170 },
-  waistCm: { min: 50, max: 165 },
-  hipCm: { min: 75, max: 180 },
-  underbustCm: { min: 60, max: 150 },
-  highHipCm: { min: 60, max: 175 },
-  neckCm: { min: 28, max: 52 },
-  shoulderWidthCm: { min: 30, max: 52 },
-  shoulderLengthCm: { min: 9, max: 17 },
-  backWaistLengthCm: { min: 33, max: 52 },
-  frontWaistLengthCm: { min: 35, max: 62 },
-  shoulderToBustPointCm: { min: 18, max: 40 },
-  bustPointDistanceCm: { min: 13, max: 30 },
-  armLengthCm: { min: 48, max: 70 },
-  upperArmCm: { min: 21, max: 55 },
-  elbowCm: { min: 19, max: 42 },
-  wristCm: { min: 12.5, max: 24 },
-  waistToHipCm: { min: 14, max: 30 },
-  waistToKneeCm: { min: 48, max: 72 },
-  waistToFloorCm: { min: 85, max: 128 },
-  crotchDepthCm: { min: 21, max: 40 },
-  inseamCm: { min: 62, max: 95 },
-  thighCm: { min: 40, max: 95 },
-  kneeCm: { min: 29, max: 55 },
-  calfCm: { min: 27, max: 55 },
-  ankleCm: { min: 18, max: 32 },
-};
+/** Plausible ranges for adult women (cm), from the shared schema metadata. */
+const RANGES: Record<MeasurementKey, { min: number; max: number }> = Object.fromEntries(
+  MEASUREMENT_KEYS.map((k) => [k, { min: MEASUREMENT_FIELDS[k].min, max: MEASUREMENT_FIELDS[k].max }]),
+) as Record<MeasurementKey, { min: number; max: number }>;
 
 /** Margin beyond the plausible range (fraction) that turns a warning into an error. */
 const HARD_MARGIN = 0.25;
@@ -133,17 +82,33 @@ function isNum(v: unknown): v is number {
  */
 export function validateMeasurements(m: Measurements): MeasurementIssue[] {
   const issues: MeasurementIssue[] = [];
-  const record = m as unknown as Record<string, unknown>;
+  const record = (m ?? {}) as unknown as Record<string, unknown>;
 
-  // Required presence
-  for (const key of REQUIRED) {
-    const v = record[key];
-    if (v === undefined || v === null || (typeof v === 'string' && v === '')) {
-      issues.push({ key, severity: 'error', message: `Your ${LABELS[key]} is needed. Measure it in centimetres and enter it.` });
-    } else if (!isNum(v)) {
-      issues.push({ key, severity: 'error', message: `The ${LABELS[key]} must be a number in centimetres (you entered "${String(v)}").` });
-    } else if (v <= 0) {
-      issues.push({ key, severity: 'error', message: `The ${LABELS[key]} must be greater than zero.` });
+  // Structure first (zod schema): required fields, numbers, positive values, unknown keys.
+  for (const iss of measurementSchemaIssues(record)) {
+    if (iss.code === 'unrecognized_keys') {
+      for (const k of iss.keys) issues.push(unknownKeyIssue(k));
+      continue;
+    }
+    const key = iss.path[0];
+    if (typeof key !== 'string' || !(key in MEASUREMENT_FIELDS)) {
+      issues.push({ key: 'general', severity: 'error', message: 'Measurements must be given as an object of numbers in centimetres, e.g. { "heightCm": 168, "bustCm": 88, "waistCm": 70, "hipCm": 94 }.' });
+      continue;
+    }
+    const mk = key as MeasurementKey;
+    const v = record[mk];
+    const label = LABELS[mk];
+    const required = MEASUREMENT_FIELDS[mk].required;
+    if (v === undefined || v === null || v === '') {
+      if (required) issues.push({ key: mk, severity: 'error', message: `Your ${label} is needed. ${MEASUREMENT_FIELDS[mk].howTo} Enter it in centimetres.` });
+    } else if (iss.code === 'invalid_type' || !isNum(v)) {
+      issues.push({ key: mk, severity: 'error', message: `The ${label} must be a number in centimetres (you entered "${String(v)}").` });
+    } else {
+      issues.push({
+        key: mk,
+        severity: 'error',
+        message: required ? `The ${label} must be greater than zero.` : `The ${label} must be greater than zero. Leave it empty if you don't know it and we'll estimate it.`,
+      });
     }
   }
   if (issues.some((i) => i.severity === 'error')) return issues;
@@ -162,15 +127,7 @@ export function validateMeasurements(m: Measurements): MeasurementIssue[] {
   // Ranges + inch detection per key
   for (const key of Object.keys(RANGES) as MeasurementKey[]) {
     const v = record[key];
-    if (v === undefined || v === null) continue;
-    if (!isNum(v)) {
-      issues.push({ key, severity: 'error', message: `The ${LABELS[key]} must be a number in centimetres (you entered "${String(v)}").` });
-      continue;
-    }
-    if (v <= 0) {
-      issues.push({ key, severity: 'error', message: `The ${LABELS[key]} must be greater than zero. Leave it empty if you don't know it and we'll estimate it.` });
-      continue;
-    }
+    if (!isNum(v)) continue;
     const { min, max } = RANGES[key];
     const hardMin = min * (1 - HARD_MARGIN);
     const hardMax = max * (1 + HARD_MARGIN);
@@ -324,7 +281,7 @@ export function validateMeasurements(m: Measurements): MeasurementIssue[] {
     issues.push({ key: 'heightCm', severity: 'info', message: `Tall proportions detected: lengths are scaled to your height; check fabric quantities as they will be above standard.` });
   }
 
-  const missing = (Object.keys(RANGES) as MeasurementKey[]).filter((k) => !REQUIRED.includes(k as (typeof REQUIRED)[number]) && !isNum(record[k]));
+  const missing = MEASUREMENT_KEYS.filter((k) => !REQUIRED_MEASUREMENT_KEYS.includes(k) && !isNum(record[k]));
   if (missing.length > 0) {
     issues.push({
       key: 'general',
@@ -333,6 +290,17 @@ export function validateMeasurements(m: Measurements): MeasurementIssue[] {
     });
   }
   return issues;
+}
+
+/** Warning for a key that is not a known measurement, with a "did you mean" hint. */
+function unknownKeyIssue(k: string): MeasurementIssue {
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z]/g, '').replace(/cm$/, '');
+  const guess = MEASUREMENT_KEYS.find((x) => norm(x) === norm(k)) ?? MEASUREMENT_KEYS.find((x) => norm(x).startsWith(norm(k)) && norm(k).length >= 3);
+  return {
+    key: 'general',
+    severity: 'warning',
+    message: `"${k}" is not a measurement we know, so it is ignored.${guess ? ` Did you mean "${guess}"?` : ''} Measurement names end in "Cm", e.g. "bustCm".`,
+  };
 }
 
 function cap(s: string): string {
@@ -432,20 +400,6 @@ export function computeLandmarks(r: ResolvedMeasurements): BodyLandmarks {
   const calf = Math.max(ankle + 10, knee - 0.065 * r.heightCm);
   const elbow = shoulder - 0.56 * r.armLengthCm;
   const wrist = shoulder - r.armLengthCm;
-  return {
-    head: r.heightCm,
-    nape,
-    shoulder,
-    bust,
-    underbust,
-    waist,
-    highHip,
-    hip,
-    crotch,
-    knee,
-    calf,
-    ankle,
-    elbow,
-    wrist,
-  };
+  const raw: BodyLandmarks = { head: r.heightCm, nape, shoulder, bust, underbust, waist, highHip, hip, crotch, knee, calf, ankle, elbow, wrist };
+  return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, r1(v)])) as unknown as BodyLandmarks;
 }

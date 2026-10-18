@@ -1,5 +1,6 @@
 import type { BomItem, DesignPackage, InstructionStep, MeasurementKey } from '../types';
 import { fmt } from './shared';
+import { MEASUREMENT_FIELDS } from '../schema';
 
 const MEASUREMENT_LABELS: Array<[MeasurementKey, string]> = [
   ['heightCm', 'Height'],
@@ -148,6 +149,20 @@ export function renderInstructionsMarkdown(pkg: DesignPackage): string {
       '',
     );
   }
+  // How to measure: the same plain-language instructions the app and the
+  // JSON Schema use, for the measurements this design relies on.
+  L.push('### How to measure yourself', '');
+  L.push(
+    'Measure in close-fitting underwear (and the bra you will wear), standing relaxed, with a flexible tape held level and snug but not tight. Tie a thin ribbon round your natural waist first: many measurements start there. A helper makes it far easier.',
+    '',
+  );
+  for (const [key, label] of MEASUREMENT_LABELS) {
+    const f = MEASUREMENT_FIELDS[key];
+    if (!f) continue;
+    if (!f.required && !estimated.has(key)) continue;
+    L.push(`- **${cell(label)}**${estimated.has(key) ? ' (estimated for you, worth measuring)' : ''}: ${cell(f.howTo)}`);
+  }
+  L.push('');
   if (pkg.measurementIssues.length) {
     L.push('**Measurement notes:**', '');
     for (const i of pkg.measurementIssues) L.push(`- *${i.severity}* (${i.key}): ${i.message}`);
@@ -168,7 +183,15 @@ export function renderInstructionsMarkdown(pkg: DesignPackage): string {
   if (fin.lengthFromShoulder !== undefined) L.push(`| Length from shoulder | ${fmt(fin.lengthFromShoulder)} | | |`);
   if (fin.sleeveLength !== undefined && fin.sleeveLength > 0) L.push(`| Sleeve length | ${fmt(fin.sleeveLength)} | ${fmt(measurements.armLengthCm)} | |`);
   if (fin.inseam !== undefined) L.push(`| Inseam | ${fmt(fin.inseam)} | ${fmt(measurements.inseamCm)} | |`);
-  L.push(`| Hem height from floor | ${fmt(fit.hemHeightFromFloorCm)} | | |`);
+  const heel = fit.shoeHeelCm ?? 0;
+  if (fit.options.length === 'floor' && heel > 0) {
+    L.push(`| Hem height from floor in ${fmt(heel)} cm heels | ${fmt(fit.hemHeightFromFloorCm + heel)} | | |`);
+  } else {
+    L.push(`| Hem height from floor | ${fmt(fit.hemHeightFromFloorCm)} | | |`);
+  }
+  if (estimated.has('waistToFloorCm') || estimated.has('waistToKneeCm')) {
+    L.push('', '> ⚠ The hem height and lengths rest on an estimated leg length: check them at the hem step before you cut the hem allowance.');
+  }
   L.push('');
 
   // ---- BOM ------------------------------------------------------------------
