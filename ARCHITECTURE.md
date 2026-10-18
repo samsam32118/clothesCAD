@@ -12,6 +12,22 @@ glossary, fit rationale, and a 3D model (GLB/OBJ).
 - The contract is `src/core/types.ts`. Do not change existing fields; additive optional fields only.
 - Pipeline: `src/core/design.ts` → `design(request): DesignPackage`.
 
+## Libraries (installed; use them instead of hand-rolling)
+| Need | Library | Where |
+|---|---|---|
+| Seam/hem allowance offsetting, polygon union/intersection (overlap checks), simplification | `clipper-lib` (Clipper, integer coords → scale cm×1000; `@types/clipper-lib`) | geometry, layout, quality, eval |
+| Bézier curves (hip curve, armhole, crotch, sleeve cap, necklines): flattening, length, split, offset | `bezier-js` | geometry, drafting |
+| Runtime validation of `DesignRequest` / measurements + JSON Schema for agents | `zod` v4 (`z.toJSONSchema`) — schemas in `src/core/schema.ts` (owned by drafting) | core, console API, CLI |
+| 3D | `three` (+ `three/examples/jsm`: GLTFExporter, OBJExporter, OrbitControls, BufferGeometryUtils) | src/three |
+| App state shared by UI + console | `zustand` (vanilla store usable outside React + `useStore` hook) | src/ui, src/console |
+| Pinch/drag pan-zoom of pattern SVG | `@use-gesture/react` | src/ui |
+| Printable tiled PDF of pattern (1:1) and booklet | `jspdf` + `svg2pdf.js` (browser) | src/ui (export), lazy-loaded |
+| Zip download of all artifacts | `fflate` | src/ui, cli |
+| CLI argument parsing | `commander` | cli |
+| SVG/XML well-formedness in Node | `@xmldom/xmldom` | eval, tests |
+
+Do not add other dependencies without a strong reason; never add packages with heavy transitive trees.
+
 ## Module ownership and required exports
 
 ### Drafting engine (owner: drafting)
